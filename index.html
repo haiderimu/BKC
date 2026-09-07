@@ -174,6 +174,9 @@ details.hist .body{padding:0 14px 14px;display:grid;gap:12px}
 
 .evt .when span{white-space:nowrap}
 form[data-form=guest] button{white-space:nowrap}
+.names button.locked{opacity:.5;cursor:not-allowed}
+.names button .lk{font-size:12px}
+.plist .p{grid-template-columns:1fr auto}
 </style>
 </head>
 <body>
@@ -210,10 +213,10 @@ const SEED={players:[{id:"haider",name:"Haider",active:true},{id:"fadil",name:"F
 /* ---------- state ---------- */
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let S={players:[],settings:Object.assign({},SEED.settings),sessions:{},events:{}};
+let S={players:[],settings:Object.assign({},SEED.settings),sessions:{},events:{},claims:{}};
 let mode='pending';   // 'pending' | 'live' | 'offline'
 let db=null, rootRef=null;
-const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false};
+const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false,addMode:false,pin:null,pinErr:false};
 try{ const t=sessionStorage.getItem('bkc-tab'); if(t) ui.tab=t; }catch(e){}
 let ME=null; try{ ME=localStorage.getItem('bkc-me'); }catch(e){}
 function readHash(){ const m=/event=([A-Za-z0-9_-]+)/.exec(location.hash||''); if(m){ ui.tab='events'; ui.eventId=m[1]; } }
@@ -238,6 +241,19 @@ const sortedEvents=()=>Object.values(S.events).sort((a,b)=>(a.date+(a.time||''))
 const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=todayISO());
 const regList=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
 const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
+let DEVICE=null; try{ DEVICE=localStorage.getItem('bkc-device'); if(!DEVICE){ DEVICE='d'+Math.random().toString(36).slice(2,10)+Date.now().toString(36); localStorage.setItem('bkc-device',DEVICE); } }catch(e){ DEVICE='tmp'; }
+const claimOf=pid=>(S.claims||{})[pid]||null;
+const ownedByMe=pid=>claimOf(pid)===DEVICE;
+const lockedForMe=pid=>{ const c=claimOf(pid); return !!c&&c!==DEVICE; };
+let ADMIN=null; try{ ADMIN=localStorage.getItem('bkc-admin'); }catch(e){}
+const pinSet=()=>!!(S.settings.adminPin&&String(S.settings.adminPin).length>=4);
+const isAdmin=()=>!pinSet()||(ADMIN!=null&&String(ADMIN)===String(S.settings.adminPin));
+const setAdmin=v=>{ ADMIN=v; try{ if(v==null) localStorage.removeItem('bkc-admin'); else localStorage.setItem('bkc-admin',String(v)); }catch(e){} };
+const mineKey=eid=>'bkc-mine-'+eid;
+const mine=eid=>{ try{ return JSON.parse(localStorage.getItem(mineKey(eid))||'[]'); }catch(e){ return []; } };
+const addMine=(eid,pid)=>{ try{ const m=mine(eid); if(!m.includes(pid)){ m.push(pid); localStorage.setItem(mineKey(eid),JSON.stringify(m)); } }catch(e){} };
+const canUnreg=(eid,pid)=>isAdmin()||mine(eid).includes(pid);
+const unlockBtn=label=>'<button class="sm ghost" data-act="unlock">🔒 '+(label||'Organizer? Unlock')+'</button>';
 const setMe=id=>{ ME=id; try{ if(id) localStorage.setItem('bkc-me',id); else localStorage.removeItem('bkc-me'); }catch(x){} };
 function toast(msg){const t=$('#toast');t.textContent=msg;t.className='toast';t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(()=>t.hidden=true,2200);}
 function setChip(t){$('#hdr-chip').textContent=t;}
@@ -256,7 +272,7 @@ function normalize(raw){
   });
   const events={};
   Object.entries(raw.events||{}).forEach(([id,e])=>{ if(e){ events[id]=Object.assign({},e,{id,regs:e.regs||{}}); } });
-  return {players,settings:Object.assign({},SEED.settings,raw.settings||{}),sessions,events};
+  return {players,settings:Object.assign({},SEED.settings,raw.settings||{}),sessions,events,claims:raw.claims||{}};
 }
 function write(path,value){ // set
   return rootRef.child(path).set(value).catch(err=>{console.error(err);toast('Could not save — check your connection');});
@@ -402,8 +418,8 @@ function render(){
   else if(ui.tab==='history') app.innerHTML=viewHistory();
   else if(ui.tab==='events') app.innerHTML=ui.eventId&&S.events[ui.eventId]?viewEvent(S.events[ui.eventId]):viewEvents();
   else app.innerHTML=viewPlayers();
-  $('#sheet').innerHTML=ui.editing?viewSheet():'';
-  document.body.style.overflow=ui.editing?'hidden':'';
+  $('#sheet').innerHTML=ui.editing?viewSheet():(ui.pin?viewPin():'');
+  document.body.style.overflow=(ui.editing||ui.pin)?'hidden':'';
 }
 function renderChip(){
   if(mode==='pending') setChip('Connecting…');
@@ -433,15 +449,18 @@ function viewPlay(){
     const e=up[0];
     const regs=regList(e), cap=e.max>0?e.max:0, playing=cap?regs.slice(0,cap):regs;
     let h=eventCard(e,{compact:true});
-    if(playing.length>=4&&canWrite()){
+    if(!isAdmin()){
+      h+='<section class="card"><div class="row between"><span class="small muted">The organizer starts the session on game day.</span>'+unlockBtn()+'</div></section>';
+    }else if(playing.length>=4&&canWrite()){
       h+='<section class="card"><div class="actions"><button class="accent grow" data-act="from-event" data-eid="'+e.id+'">Start session with these '+playing.length+' players</button></div>'
         +'<p class="small muted" style="margin:10px 0 0">Builds the round-robin from the registered list. You can still adjust names on the next screen.</p></section>';
     }else if(canWrite()){
       h+='<section class="card"><p class="small muted" style="margin:0">Need at least 4 registered players to start. Share the event so people can sign up.</p></section>';
     }
-    h+='<p class="small muted" style="text-align:center;margin:4px 0 14px"><button class="sm ghost" data-act="manual">Set up a session manually instead</button></p>';
+    if(isAdmin()) h+='<p class="small muted" style="text-align:center;margin:4px 0 14px"><button class="sm ghost" data-act="manual">Set up a session manually instead</button></p>';
     return h;
   }
+  if(!isAdmin()) return '<section class="card"><div class="empty">No session running and no upcoming event.<br><span class="small">The organizer creates events and starts sessions.</span></div><div class="row" style="justify-content:center">'+unlockBtn()+'</div></section>';
   let h=viewSetup();
   if(ui.manual) h='<p class="small" style="margin:0 0 10px"><button class="sm ghost" data-act="manual-off">← Back to the event</button></p>'+h;
   else if(canWrite()) h='<section class="card" style="background:var(--ball-soft);border-color:transparent;color:var(--on-ball)"><div class="row between"><div><b>No upcoming event.</b> <span class="small">Create one so people can register before game day.</span></div><button class="sm" data-act="go-new-event">New event</button></div></section>'+h;
@@ -511,9 +530,10 @@ function viewSession(s){
     st.forEach((r,i)=>{const d=r.pf-r.pa;h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name">'+esc(nameOf(r.id))+(i===0&&played===live&&live>0?'<span class="tag mvp">Day MVP</span>':'')+'</td><td class="num">'+r.w+'–'+r.l+'</td><td class="'+(d>0?'up':d<0?'down':'')+'">'+(d>0?'+':'')+d+'</td><td class="muted">'+r.pf+'</td></tr>';});
     h+='</tbody></table></div></section>';
   }
-  h+='<section class="card flat"><div class="row between" style="padding:0 2px 8px"><h3>Games</h3>'+(canWrite()?'<button class="sm ghost" data-act="regen" title="Rebuild the games not yet played">Regenerate remaining</button>':'')+'</div>';
+  h+='<section class="card flat"><div class="row between" style="padding:0 2px 8px"><h3>Games</h3>'+(canWrite()&&isAdmin()?'<button class="sm ghost" data-act="regen" title="Rebuild the games not yet played">Regenerate remaining</button>':'')+'</div>';
   h+='<div class="stack" style="gap:6px">'+rows.map(g=>gameRow(g,ids,canWrite())).join('')+'</div></section>';
-  if(canWrite()){
+  if(canWrite()&&!isAdmin()) h+='<section class="card"><div class="row between"><span class="small muted">Tap any game to enter its score. Organizer tools are locked.</span>'+unlockBtn()+'</div></section>';
+  if(canWrite()&&isAdmin()){
     h+='<section class="card"><div class="actions">'
       +'<button class="grow" data-act="add-game">Add a game</button>'
       +'<button class="grow" data-act="edit-players">Change players</button>'
@@ -547,21 +567,28 @@ function eventCard(e,o){
   // registered list
   h+='<div style="margin-top:14px">';
   if(regs.length){
-    h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+esc(nameOf(p))+'</span>').join('')
-      +wait.map((p,i)=>'<span class="r wait'+(p===ME?' me':'')+'"><i>W'+(i+1)+'</i>'+esc(nameOf(p))+'</span>').join('')+'</div>';
+    const rm=p=>(isAdmin()&&!closed?' <button class="sm ghost" style="padding:0 4px;border:0;line-height:1;color:inherit" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+p+'" aria-label="Remove">✕</button>':'');
+    h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+esc(nameOf(p))+rm(p)+'</span>').join('')
+      +wait.map((p,i)=>'<span class="r wait'+(p===ME?' me':'')+'"><i>W'+(i+1)+'</i>'+esc(nameOf(p))+rm(p)+'</span>').join('')+'</div>';
     if(wait.length) h+='<p class="small muted" style="margin:8px 0 0">'+wait.length+' on the waitlist — they move up automatically if someone drops out.</p>';
   }else h+='<p class="muted" style="margin:0">Nobody registered yet. Be the first.</p>';
   h+='</div>';
   // registration controls
   if(!closed&&!past&&canWrite()){
     h+='<div style="margin-top:14px" class="stack">';
-    if(ME&&byId()[ME]&&!ui.pickMe){
-      h+='<div class="me-bar"><span>You are <b>'+esc(nameOf(ME))+'</b></span><button class="sm ghost" data-act="pick-me">Not you?</button></div>';
-      h+='<div class="actions">'+(meIn
+    if(ME&&byId()[ME]&&!ui.pickMe&&!ui.addMode){
+      h+='<div class="me-bar"><span>You are <b>'+esc(nameOf(ME))+'</b></span><span class="row" style="gap:4px">'+(isAdmin()?'<button class="sm ghost" data-act="add-mode" data-eid="'+e.id+'">Add others</button>':'')+'<button class="sm ghost" data-act="pick-me">Not you?</button></span></div>';
+      if(meIn&&!canUnreg(e.id,ME)) h+='<p class="small muted" style="margin:0">You are registered (from another phone). To cancel, ask the organizer to remove you.</p>';
+      else h+='<div class="actions">'+(meIn
         ?'<button class="grow" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+ME+'">I can\'t make it</button>'
         :'<button class="accent grow" data-act="reg-in" data-eid="'+e.id+'" data-pid="'+ME+'">I\'m in</button>')+'</div>';
     }else{
-      h+='<div class="eyebrow">Tap your name</div><div class="names">'+S.players.filter(p=>p.active!==false).map(p=>'<button class="'+(regs.includes(p.id)?'in':'')+'" data-act="choose-me" data-eid="'+e.id+'" data-pid="'+p.id+'">'+esc(p.name)+(regs.includes(p.id)?' ✓':'')+'</button>').join('')+'</div>'
+      const adding=!!ui.addMode&&isAdmin();
+      h+='<div class="row between"><div class="eyebrow">'+(adding?'Tap names to add them to the list':'Tap your name')+'</div>'+((ui.pickMe||adding)?'<button class="sm ghost" data-act="pick-done">Done</button>':'')+'</div><div class="names">'+S.players.filter(p=>p.active!==false).map(p=>{
+          const locked=lockedForMe(p.id)&&!adding;
+          return '<button class="'+(regs.includes(p.id)?'in':'')+(locked?' locked':'')+'" '+(locked?'disabled title="Linked to another phone"':'')+' data-act="choose-me" data-eid="'+e.id+'" data-pid="'+p.id+'">'+esc(p.name)+(regs.includes(p.id)?' ✓':'')+(lockedForMe(p.id)?' <span class="lk">🔒</span>':'')+'</button>';
+        }).join('')+'</div>'
+        +'<p class="small muted" style="margin:0">'+(adding?'Adding as organizer — the names stay linked to their own phones.':'Your name links to this phone the first time you tap it, so nobody else can register as you. 🔒 = linked to another phone.')+'</p>'
         +'<form class="row" data-form="guest" data-eid="'+e.id+'"><input type="text" name="name" placeholder="Not on the list? Type your name" autocomplete="off" required><button type="submit">Add me</button></form>';
     }
     h+='</div>';
@@ -598,7 +625,8 @@ function viewEvents(){
   const all=sortedEvents(), today=todayISO();
   const up=all.filter(e=>e.status!=='closed'&&e.date>=today), past=all.filter(e=>!(e.status!=='closed'&&e.date>=today)).reverse();
   let h='';
-  if(canWrite()) h+='<section class="card"><div class="eyebrow">New event</div><h2 style="margin:4px 0 12px">When are we playing?</h2>'+eventForm(null)+'</section>';
+  if(canWrite()&&isAdmin()) h+='<section class="card"><div class="eyebrow">New event</div><h2 style="margin:4px 0 12px">When are we playing?</h2>'+eventForm(null)+'</section>';
+  else if(canWrite()) h+='<section class="card"><div class="row between"><span class="small muted">Only the organizer can create events.</span>'+unlockBtn()+'</div></section>';
   h+='<section class="card flat"><h3 style="padding:0 2px 8px">Upcoming</h3>';
   if(!up.length) h+='<div class="empty" style="background:var(--surface);border:1px solid var(--line);border-radius:var(--r)">No upcoming events.</div>';
   else h+='<div class="evlist">'+up.map(e=>evRow(e,false)).join('')+'</div>';
@@ -615,7 +643,8 @@ function evRow(e,past){
 function viewEvent(e){
   let h='<p class="small" style="margin:0 0 10px"><button class="sm ghost" data-act="back-events">← All events</button></p>';
   h+=eventCard(e,{});
-  if(canWrite()){
+  if(canWrite()&&!isAdmin()) h+='<section class="card"><div class="row between"><span class="small muted">Organizer tools are locked.</span>'+unlockBtn()+'</div></section>';
+  if(canWrite()&&isAdmin()){
     h+='<section class="card">';
     if(ui.eventForm&&ui.eventForm.editing===e.id){ h+='<h3 style="margin-bottom:10px">Edit event</h3>'+eventForm(e); }
     else{
@@ -628,11 +657,20 @@ function viewEvent(e){
         ?'<span class="small">Delete this event? <button class="sm danger" data-act="del-event-yes" data-eid="'+e.id+'">Delete</button> <button class="sm ghost" data-act="cancel">Cancel</button></span>'
         :'<button class="ghost danger" data-act="del-event" data-eid="'+e.id+'">Delete</button>';
       h+='</div>';
-      if(regs.length) h+='<p class="small muted" style="margin:10px 0 0">To remove someone who can\'t come, tap "Not you?", choose their name, then tap "I can\'t make it".</p>';
+      if(regs.length) h+='<p class="small muted" style="margin:10px 0 0">To remove someone who can\'t come, tap the ✕ next to their name above.</p>';
     }
     h+='</section>';
   }
   return h;
+}
+/* --- organizer PIN --- */
+function viewPin(){
+  return '<div class="sheet-bg" data-act="close-bg"><div class="sheet" role="dialog" aria-label="Organizer PIN">'
+    +'<div class="row between"><div><div class="eyebrow">Organizer</div><h2>Enter the PIN</h2></div><button class="ghost sm" data-act="close">Close</button></div>'
+    +'<p class="small muted" style="margin:6px 0 12px">Only the organizers have this PIN. Once entered, this phone stays unlocked.</p>'
+    +'<form class="row" data-form="pin"><input type="password" inputmode="numeric" pattern="[0-9]*" name="pin" placeholder="PIN" autocomplete="off" autofocus style="font-size:22px;letter-spacing:.3em;text-align:center"><button class="primary" type="submit">Unlock</button></form>'
+    +(ui.pinErr?'<p class="small" style="color:var(--bad);margin:8px 0 0">That PIN is not right.</p>':'')
+    +'</div></div>';
 }
 /* --- score sheet --- */
 function viewSheet(){
@@ -713,7 +751,7 @@ function viewHistory(){
       h+='</tbody></table></div>';
     }
     h+='<div class="stack" style="gap:6px">'+games.map(g=>gameRow(g,s.playerIds,false)).join('')+'</div>';
-    if(canWrite()){
+    if(canWrite()&&isAdmin()){
       h+='<div class="actions">'+(s.status!=='open'?'<button class="sm" data-act="reopen" data-sid="'+s.id+'">Reopen to fix scores</button>':'')
         +(ui.confirm==='del:'+s.id?'<span class="small">Delete this whole session? <button class="sm danger" data-act="del-yes" data-sid="'+s.id+'">Delete</button> <button class="sm ghost" data-act="cancel">Cancel</button></span>':'<button class="sm ghost danger" data-act="del" data-sid="'+s.id+'">Delete</button>')+'</div>';
     }
@@ -722,24 +760,41 @@ function viewHistory(){
 }
 /* --- Players tab --- */
 function viewPlayers(){
+  const adm=canWrite()&&isAdmin();
   let h='<section class="card"><div class="eyebrow">Roster</div><h2 style="margin:4px 0 12px">'+S.players.length+' players</h2>';
-  if(canWrite()) h+='<form class="row" data-form="add" style="margin-bottom:12px"><input type="text" name="name" placeholder="Add a player" autocomplete="off" required><button class="primary" type="submit">Add</button></form>';
+  if(adm) h+='<form class="row" data-form="add" style="margin-bottom:12px"><input type="text" name="name" placeholder="Add a player" autocomplete="off" required><button class="primary" type="submit">Add</button></form>';
   h+='<div class="plist">'+S.players.map(p=>'<div class="p'+(p.active===false?' off':'')+'">'
-    +(canWrite()?'<input type="text" value="'+esc(p.name)+'" data-rename="'+p.id+'" aria-label="Name">':'<span>'+esc(p.name)+'</span>')
+    +(adm?'<input type="text" value="'+esc(p.name)+'" data-rename="'+p.id+'" aria-label="Name">':'<span>'+esc(p.name)+'</span>')
     +'<span class="small muted">'+(p.active===false?'inactive':'')+'</span>'
-    +(canWrite()?'<button class="sm ghost" data-act="toggle" data-pid="'+p.id+'">'+(p.active===false?'Reactivate':'Set inactive')+'</button>':'')
+    +(adm?'<span class="row" style="gap:4px">'+(claimOf(p.id)?'<button class="sm ghost" data-act="unlink" data-pid="'+p.id+'" title="Let this name be claimed by a new phone">Unlink phone</button>':'<span class="small muted">no phone yet</span>')+'<button class="sm ghost" data-act="toggle" data-pid="'+p.id+'">'+(p.active===false?'Reactivate':'Set inactive')+'</button></span>':'')
     +'</div>').join('')+'</div>';
-  h+='<p class="small muted" style="margin:12px 0 0">Inactive players stay in the history and ratings but are not pre-selected for new sessions. Rename by editing the name and tapping away.</p></section>';
-  h+='<section class="card"><h3>Settings</h3><div class="row" style="gap:12px;margin-top:10px;align-items:end">'
-    +'<label class="field">Games to<input type="number" data-setting="pointsTo" value="'+(S.settings.pointsTo||11)+'" min="5" max="25" '+(canWrite()?'':'disabled')+'></label>'
-    +'<label class="field">Session minutes<input type="number" data-setting="minutes" value="'+(S.settings.minutes||120)+'" min="30" max="300" step="15" '+(canWrite()?'':'disabled')+'></label>'
-    +'<label class="field">Default games each<input type="number" data-setting="target" value="'+(S.settings.target||6)+'" min="3" max="12" '+(canWrite()?'':'disabled')+'></label></div></section>';
+  if(adm) h+='<p class="small muted" style="margin:12px 0 0">Inactive players stay in the history and ratings but are not pre-selected for new sessions. Rename by editing the name and tapping away. "Unlink phone" lets someone who changed phones claim their name again.</p>';
+  h+='</section>';
+  // organizer section
+  h+='<section class="card"><h3>Organizer</h3>';
+  if(!pinSet()){
+    h+='<p class="small muted" style="margin:6px 0 10px">No organizer PIN is set, so anyone can create events and start sessions. Set a 4–6 digit PIN and share it only with the organizers.</p>'
+      +'<form class="row" data-form="pin-set"><input type="text" inputmode="numeric" pattern="[0-9]*" name="pin" placeholder="New PIN" autocomplete="off" maxlength="6" style="max-width:160px"><button class="primary" type="submit">Set PIN</button></form>';
+  }else if(isAdmin()){
+    h+='<p class="small muted" style="margin:6px 0 10px">This phone is unlocked as organizer. Anyone with the PIN can unlock theirs.</p>'
+      +'<div class="actions"><button class="ghost" data-act="lock">Lock this phone</button></div>'
+      +'<form class="row" data-form="pin-set" style="margin-top:12px"><input type="text" inputmode="numeric" pattern="[0-9]*" name="pin" placeholder="Change PIN" autocomplete="off" maxlength="6" style="max-width:160px"><button type="submit">Change</button></form>';
+  }else{
+    h+='<p class="small muted" style="margin:6px 0 10px">Creating events, starting sessions and editing the roster need the organizer PIN.</p><div class="actions">'+unlockBtn('Unlock with PIN')+'</div>';
+  }
+  h+='</section>';
+  if(adm){
+    h+='<section class="card"><h3>Settings</h3><div class="row" style="gap:12px;margin-top:10px;align-items:end">'
+      +'<label class="field">Games to<input type="number" data-setting="pointsTo" value="'+(S.settings.pointsTo||11)+'" min="5" max="25"></label>'
+      +'<label class="field">Session minutes<input type="number" data-setting="minutes" value="'+(S.settings.minutes||120)+'" min="30" max="300" step="15"></label>'
+      +'<label class="field">Default games each<input type="number" data-setting="target" value="'+(S.settings.target||6)+'" min="3" max="12"></label></div></section>';
+  }
   return h;
 }
 
 /* ---------- events ---------- */
 document.addEventListener('click',e=>{
-  const tab=e.target.closest('[data-tab]'); if(tab){ui.tab=tab.dataset.tab;ui.confirm=null; if(ui.tab==='events'){ui.eventId=null;ui.eventForm=null; if(location.hash) history.replaceState(null,'',location.pathname+location.search);}try{sessionStorage.setItem('bkc-tab',ui.tab);}catch(x){};render();return;}
+  const tab=e.target.closest('[data-tab]'); if(tab){ui.tab=tab.dataset.tab;ui.confirm=null;ui.addMode=false;ui.pickMe=false; if(ui.tab==='events'){ui.eventId=null;ui.eventForm=null; if(location.hash) history.replaceState(null,'',location.pathname+location.search);}try{sessionStorage.setItem('bkc-tab',ui.tab);}catch(x){};render();return;}
   const rv=e.target.closest('[data-rv]'); if(rv){ui.ratingsView=rv.dataset.rv;render();return;}
   const gm=e.target.closest('[data-game]'); if(gm){ const s=currentSession(); if(!s) return; const g=s.games[gm.dataset.game]; if(!g) return; ui.editing={sid:s.id,gid:g.id,sa:g.sa==null?0:g.sa,sb:g.sb==null?0:g.sb}; render(); return; }
   const inc=e.target.closest('[data-inc]'); if(inc){ const [k,d]=inc.dataset.inc.split(':'); const key='s'+k; ui.editing[key]=Math.max(0,Math.min(40,ui.editing[key]+Number(d))); render(); return; }
@@ -752,32 +807,40 @@ document.addEventListener('change',e=>{
   const t=e.target;
   if(t.dataset.setup){ if(t.dataset.setup==='date') ui.setup.date=t.value; else ui.setup.target=Number(t.value); ui.preview=null; render(); return; }
   if(t.dataset.pick){ if(!ui.setup){ const cs=currentSession(); ui.setup={sel:cs?cs.playerIds.slice():[]}; } const list=ui.setup.sel; const i=list.indexOf(t.dataset.pick); if(t.checked&&i<0) list.push(t.dataset.pick); if(!t.checked&&i>=0) list.splice(i,1); ui.preview=null; render(); return; }
-  if(t.dataset.rename!==undefined){ const p=byId()[t.dataset.rename]; const v=t.value.trim(); if(p&&v&&v!==p.name){ p.name=v; write('players',S.players); toast('Renamed'); } else render(); return; }
-  if(t.dataset.setting){ const v=Number(t.value); if(v>0){ patch('settings',{[t.dataset.setting]:v}); toast('Saved'); } return; }
+  if(t.dataset.rename!==undefined){ if(!isAdmin()) return; const p=byId()[t.dataset.rename]; const v=t.value.trim(); if(p&&v&&v!==p.name){ p.name=v; write('players',S.players); toast('Renamed'); } else render(); return; }
+  if(t.dataset.setting){ if(!isAdmin()) return; const v=Number(t.value); if(v>0){ patch('settings',{[t.dataset.setting]:v}); toast('Saved'); } return; }
 });
 document.addEventListener('submit',e=>{
+  const pf=e.target.closest('[data-form="pin"]');
+  if(pf){ e.preventDefault(); const v=pf.pin.value.trim(); if(String(v)===String(S.settings.adminPin)){ setAdmin(v); ui.pin=null; ui.pinErr=false; render(); toast('Unlocked as organizer'); } else { ui.pinErr=true; render(); } return; }
+  const ps=e.target.closest('[data-form="pin-set"]');
+  if(ps){ e.preventDefault(); const v=ps.pin.value.trim(); if(!/^\d{4,6}$/.test(v)){ toast('Use 4 to 6 digits'); return; } if(pinSet()&&!isAdmin()) return; setAdmin(v); patch('settings',{adminPin:v}); render(); toast('Organizer PIN saved'); return; }
   const gf=e.target.closest('[data-form="guest"]');
   if(gf){ e.preventDefault(); const name=gf.name.value.trim(); if(!name) return;
     const existing=S.players.find(p=>p.name.trim().toLowerCase()===name.toLowerCase());
     let id; if(existing){ id=existing.id; } else { id=slug(name); const base=id; let k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
       write('players',S.players.concat([{id,name,active:true}])); }
-    setMe(id); ui.pickMe=false; patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
+    if(ui.addMode&&isAdmin()){ patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now(),by:'organizer'}}); toast('Added '+name); return; } if(lockedForMe(id)){ toast('That name is linked to another phone'); return; } if(!claimOf(id)) patch('claims',{[id]:DEVICE}); setMe(id); ui.pickMe=false; addMine(gf.dataset.eid,id); patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
   const ef=e.target.closest('[data-form="event"]');
-  if(ef){ e.preventDefault(); const date=ef.date.value, time=ef.time.value||'', place=ef.place.value.trim(), note=ef.note.value.trim(), max=Math.max(0,Number(ef.max.value)||0);
+  if(ef){ e.preventDefault(); if(!isAdmin()){ ui.pin={}; render(); return; } const date=ef.date.value, time=ef.time.value||'', place=ef.place.value.trim(), note=ef.note.value.trim(), max=Math.max(0,Number(ef.max.value)||0);
     if(!date) return;
     if(ef.dataset.eid){ patch('events/'+ef.dataset.eid,{date,time,place,note,max}); ui.eventForm=null; toast('Event updated'); }
     else { const id=date+'-'+Math.random().toString(36).slice(2,6); write('events/'+id,{id,date,time,place,note,max,status:'open',createdAt:Date.now(),regs:{}}); ui.eventId=id; ui.tab='events'; location.hash='event='+id; toast('Event created — share it!'); }
     return; }
-  const f=e.target.closest('[data-form="add"]'); if(!f) return; e.preventDefault();
+  const f=e.target.closest('[data-form="add"]'); if(!f) return; e.preventDefault(); if(!isAdmin()) return;
   const name=f.name.value.trim(); if(!name) return;
   let id=slug(name), base=id, k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
   const players=S.players.concat([{id,name,active:true}]); if(ui.setup&&ui.setup.sel) ui.setup.sel.push(id);
   write('players',players); f.reset(); toast('Added '+name);
 });
-document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&ui.editing){ui.editing=null;render();} });
+document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&(ui.editing||ui.pin)){ui.editing=null;ui.pin=null;render();} });
 
+const ADMIN_ACTS=new Set(['unlink','gen','start','finish','finish-yes','regen','regen-yes','edit-players','players-yes','add-game','reopen','del','del-yes','manual','go-new-event','from-event','edit-event','close-event','reopen-event','del-event','del-event-yes','toggle']);
 function handle(act,btn){
   const s=currentSession();
+  if(act==='unlock'){ ui.pin={}; ui.pinErr=false; render(); return; }
+  if(act==='lock'){ setAdmin(null); render(); toast('Locked'); return; }
+  if(ADMIN_ACTS.has(act)&&!isAdmin()){ ui.pin={}; ui.pinErr=false; render(); return; }
   switch(act){
     case 'sel-all': ui.setup.sel=S.players.filter(p=>p.active!==false).map(p=>p.id); ui.preview=null; render(); break;
     case 'sel-none': ui.setup.sel=[]; ui.preview=null; render(); break;
@@ -795,7 +858,7 @@ function handle(act,btn){
     case 'clear-score': { const e=ui.editing; ui.editing=null; patch('sessions/'+e.sid+'/games/'+e.gid,{sa:null,sb:null,done:false,void:false}); toast('Score cleared'); break; }
     case 'void-game': { const e=ui.editing; const g=S.sessions[e.sid].games[e.gid]; ui.editing=null; const v=!g.void;
       patch('sessions/'+e.sid+'/games/'+e.gid,{void:v,done:v?true:(g.sa!=null)}); toast(v?'Game skipped':'Game restored'); break; }
-    case 'close': case 'close-bg': ui.editing=null; render(); break;
+    case 'close': case 'close-bg': ui.editing=null; ui.pin=null; render(); break;
     case 'cancel': ui.confirm=null; ui.setup=null; render(); break;
     case 'finish': ui.confirm='finish'; render(); break;
     case 'finish-yes': { if(!s) return; const upd={status:'closed',closedAt:Date.now()}; Object.keys(s.games).forEach(k=>{ if(!s.games[k].done) upd['games/'+k]=null; });
@@ -818,10 +881,21 @@ function handle(act,btn){
     case 'from-event': { const e=S.events[btn.dataset.eid]; if(!e) return; const regs=regList(e), cap=e.max>0?e.max:0; const playing=cap?regs.slice(0,cap):regs;
       ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
     case 'pick-me': ui.pickMe=true; render(); break;
-    case 'choose-me': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; if(!e) return; setMe(pid); ui.pickMe=false;
-      if(!(e.regs||{})[pid]){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); } else render(); break; }
-    case 'reg-in': patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
-    case 'reg-out': patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:null}); toast('Removed from the list'); break;
+    case 'add-mode': ui.addMode=true; ui.pickMe=false; render(); break;
+    case 'pick-done': ui.addMode=false; ui.pickMe=false; render(); break;
+    case 'choose-me': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; if(!e) return;
+      if(ui.addMode&&isAdmin()){
+        // organizer adding someone else: register without taking over the name
+        if(!(e.regs||{})[pid]){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now(),by:'organizer'}}); toast('Added '+first(pid)); }
+        else { patch('events/'+e.id+'/regs',{[pid]:null}); toast('Removed '+first(pid)); }
+        return; }
+      if(lockedForMe(pid)){ toast(nameOf(pid)+' is linked to another phone'); return; }
+      if(!claimOf(pid)) patch('claims',{[pid]:DEVICE});
+      setMe(pid); ui.pickMe=false;
+      if(!(e.regs||{})[pid]){ addMine(e.id,pid); patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); } else render(); break; }
+    case 'unlink': patch('claims',{[btn.dataset.pid]:null}); toast('Phone unlinked — they can claim the name again'); break;
+    case 'reg-in': if(lockedForMe(btn.dataset.pid)&&!isAdmin()){ setMe(null); ui.pickMe=true; render(); toast('This name is now linked to another phone'); return; } if(!claimOf(btn.dataset.pid)) patch('claims',{[btn.dataset.pid]:DEVICE}); addMine(btn.dataset.eid,btn.dataset.pid); patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
+    case 'reg-out': if(!canUnreg(btn.dataset.eid,btn.dataset.pid)){ toast('Only the organizer can remove others'); return; } patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:null}); toast('Removed from the list'); break;
     case 'copy-invite': { const e=S.events[btn.dataset.eid]; if(!e) return; const txt=inviteText(e);
       if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Invite copied'),()=>toast('Could not copy — use Share on WhatsApp'));
       else toast('Copy not supported here — use Share on WhatsApp'); break; }
