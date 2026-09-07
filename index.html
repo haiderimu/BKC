@@ -75,7 +75,7 @@ label.field{display:grid;gap:6px;font-size:13px;font-weight:600;color:var(--mute
 .eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--muted)}
 /* tabs */
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:6;background:var(--surface);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom)}
-nav.tabs .wrap{display:grid;grid-template-columns:repeat(4,1fr);padding:0}
+nav.tabs .wrap{display:grid;grid-template-columns:repeat(5,1fr);padding:0}
 nav.tabs button{border:0;border-radius:0;background:transparent;padding:10px 4px 8px;font-size:12px;font-weight:600;color:var(--muted);display:grid;justify-items:center;gap:4px}
 nav.tabs button svg{width:22px;height:22px}
 nav.tabs button[aria-selected=true]{color:var(--court)}
@@ -146,6 +146,34 @@ details.hist .body{padding:0 14px 14px;display:grid;gap:12px}
 .empty{padding:28px 14px;text-align:center;color:var(--muted)}
 @media (prefers-reduced-motion:no-preference){ .game{transition:box-shadow .15s} }
 @media (max-width:420px){ .game .score{font-size:22px} .side .val{font-size:46px} }
+
+/* events */
+.evt{display:grid;gap:4px}
+.evt .when{font-family:"Barlow Condensed",Arial,sans-serif;font-size:26px;font-weight:700;line-height:1.05}
+.evt .where{color:var(--muted)}
+.count{display:inline-flex;align-items:baseline;gap:4px;white-space:nowrap;flex-shrink:0;margin-left:10px;font-family:"Barlow Condensed",Arial,sans-serif;font-size:30px;font-weight:700;line-height:1}
+.count small{font-size:13px;font-family:Barlow,sans-serif;font-weight:600;color:var(--muted)}
+.regs{display:flex;flex-wrap:wrap;gap:6px}
+.regs .r{padding:5px 10px;border-radius:999px;background:var(--court-soft);color:var(--ink);font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:6px}
+.regs .r.me{background:var(--court);color:var(--on-court)}
+.regs .r.wait{background:var(--surface2);color:var(--muted)}
+.regs .r i{font-style:normal;font-size:11px;font-weight:700;opacity:.7}
+.me-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:12px;background:var(--surface2)}
+.me-bar b{font-weight:600}
+.names{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}
+.names button{padding:10px 8px;font-weight:500}
+.names button.in{background:var(--court-soft);border-color:var(--court)}
+.evlist{display:grid;gap:10px}
+.evlist .ev{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:var(--r);background:var(--surface);text-align:left;width:100%;font-weight:500}
+.evlist .ev.past{opacity:.6}
+.evlist .ev .t{font-family:"Barlow Condensed",Arial,sans-serif;font-size:20px;font-weight:700;line-height:1.1}
+.evlist .ev .s{font-size:13px;color:var(--muted)}
+.form{display:grid;gap:10px}
+.form .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.wa{background:#25D366;border-color:#25D366;color:#fff}
+
+.evt .when span{white-space:nowrap}
+form[data-form=guest] button{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -182,11 +210,14 @@ const SEED={players:[{id:"haider",name:"Haider",active:true},{id:"fadil",name:"F
 /* ---------- state ---------- */
 const $=s=>document.querySelector(s);
 const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let S={players:[],settings:Object.assign({},SEED.settings),sessions:{}};
+let S={players:[],settings:Object.assign({},SEED.settings),sessions:{},events:{}};
 let mode='pending';   // 'pending' | 'live' | 'offline'
 let db=null, rootRef=null;
-const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating'};
+const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false};
 try{ const t=sessionStorage.getItem('bkc-tab'); if(t) ui.tab=t; }catch(e){}
+let ME=null; try{ ME=localStorage.getItem('bkc-me'); }catch(e){}
+function readHash(){ const m=/event=([A-Za-z0-9_-]+)/.exec(location.hash||''); if(m){ ui.tab='events'; ui.eventId=m[1]; } }
+readHash(); window.addEventListener('hashchange',()=>{ readHash(); render(); });
 
 /* ---------- helpers ---------- */
 const byId=()=>Object.fromEntries(S.players.map(p=>[p.id,p]));
@@ -202,6 +233,12 @@ const slug=n=>n.toLowerCase().trim().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g
 const sortedSessions=()=>Object.values(S.sessions).sort((a,b)=>a.date===b.date?a.id.localeCompare(b.id):a.date.localeCompare(b.date));
 const gamesOf=s=>Object.values(s.games||{}).sort((a,b)=>a.n-b.n);
 const gid=n=>'g'+String(n).padStart(2,'0');
+const fmtTime=t=>{ if(!t) return ''; const [hh,mm]=t.split(':').map(Number); const d=new Date(2000,0,1,hh,mm); return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); };
+const sortedEvents=()=>Object.values(S.events).sort((a,b)=>(a.date+(a.time||''))<(b.date+(b.time||''))?-1:1);
+const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=todayISO());
+const regList=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
+const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
+const setMe=id=>{ ME=id; try{ if(id) localStorage.setItem('bkc-me',id); else localStorage.removeItem('bkc-me'); }catch(x){} };
 function toast(msg){const t=$('#toast');t.textContent=msg;t.className='toast';t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(()=>t.hidden=true,2200);}
 function setChip(t){$('#hdr-chip').textContent=t;}
 function setBanner(html){const b=$('#banner');if(!html){b.hidden=true;return;}b.className='banner';b.innerHTML=html;b.hidden=false;}
@@ -217,7 +254,9 @@ function normalize(raw){
     Object.entries(s.games||{}).forEach(([k,g])=>{ if(g){ g.id=g.id||k; games[k]=g; } });
     sessions[id]=Object.assign({},s,{id,games,playerIds:Array.isArray(s.playerIds)?s.playerIds.filter(Boolean):Object.values(s.playerIds||{})});
   });
-  return {players,settings:Object.assign({},SEED.settings,raw.settings||{}),sessions};
+  const events={};
+  Object.entries(raw.events||{}).forEach(([id,e])=>{ if(e){ events[id]=Object.assign({},e,{id,regs:e.regs||{}}); } });
+  return {players,settings:Object.assign({},SEED.settings,raw.settings||{}),sessions,events};
 }
 function write(path,value){ // set
   return rootRef.child(path).set(value).catch(err=>{console.error(err);toast('Could not save — check your connection');});
@@ -361,6 +400,7 @@ function render(){
   if(ui.tab==='play') app.innerHTML=viewPlay();
   else if(ui.tab==='ratings') app.innerHTML=viewRatings();
   else if(ui.tab==='history') app.innerHTML=viewHistory();
+  else if(ui.tab==='events') app.innerHTML=ui.eventId&&S.events[ui.eventId]?viewEvent(S.events[ui.eventId]):viewEvents();
   else app.innerHTML=viewPlayers();
   $('#sheet').innerHTML=ui.editing?viewSheet():'';
   document.body.style.overflow=ui.editing?'hidden':'';
@@ -371,13 +411,14 @@ function renderChip(){
   else { const s=currentSession(); setChip(s?'Live · '+fmtDate(s.date).replace(/,\s*\d{4}$/,''):'Live · in sync'); }
 }
 const ICONS={
+  events:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M9 15l2 2 4-4"/></svg>',
   play:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M12 5v14M3 12h18"/></svg>',
   ratings:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V10M10 19V5M16 19v-7M22 19H2"/></svg>',
   history:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
   players:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14.5c3 0 5.5 2 5.5 5"/></svg>'
 };
 function renderTabs(){
-  $('#tabs').innerHTML=[['play','Play'],['ratings','Ratings'],['history','History'],['players','Players']].map(([k,l])=>
+  $('#tabs').innerHTML=[['play','Play'],['events','Events'],['ratings','Ratings'],['history','History'],['players','Players']].map(([k,l])=>
     '<button data-tab="'+k+'" aria-selected="'+(ui.tab===k)+'">'+ICONS[k]+'<span>'+l+'</span></button>').join('');
 }
 const canWrite=()=>mode!=='pending';
@@ -386,7 +427,25 @@ const canWrite=()=>mode!=='pending';
 function viewPlay(){
   const s=currentSession();
   if(s) return viewSession(s);
-  return viewSetup();
+  if(mode==='pending') return '<section class="card"><div class="empty">Connecting to BKC…</div></section>';
+  const up=upcomingEvents();
+  if(!ui.manual&&up.length){
+    const e=up[0];
+    const regs=regList(e), cap=e.max>0?e.max:0, playing=cap?regs.slice(0,cap):regs;
+    let h=eventCard(e,{compact:true});
+    if(playing.length>=4&&canWrite()){
+      h+='<section class="card"><div class="actions"><button class="accent grow" data-act="from-event" data-eid="'+e.id+'">Start session with these '+playing.length+' players</button></div>'
+        +'<p class="small muted" style="margin:10px 0 0">Builds the round-robin from the registered list. You can still adjust names on the next screen.</p></section>';
+    }else if(canWrite()){
+      h+='<section class="card"><p class="small muted" style="margin:0">Need at least 4 registered players to start. Share the event so people can sign up.</p></section>';
+    }
+    h+='<p class="small muted" style="text-align:center;margin:4px 0 14px"><button class="sm ghost" data-act="manual">Set up a session manually instead</button></p>';
+    return h;
+  }
+  let h=viewSetup();
+  if(ui.manual) h='<p class="small" style="margin:0 0 10px"><button class="sm ghost" data-act="manual-off">← Back to the event</button></p>'+h;
+  else if(canWrite()) h='<section class="card" style="background:var(--ball-soft);border-color:transparent;color:var(--on-ball)"><div class="row between"><div><b>No upcoming event.</b> <span class="small">Create one so people can register before game day.</span></div><button class="sm" data-act="go-new-event">New event</button></div></section>'+h;
+  return h;
 }
 function viewSetup(){
   if(mode==='pending') return '<section class="card"><div class="empty">Connecting to BKC…</div></section>';
@@ -396,7 +455,8 @@ function viewSetup(){
   const u=ui.setup;
   const sel=new Set(u.sel);
   const n=sel.size, total=n>=4?Math.round(n*u.target/4):0, perGame=total?Math.floor((S.settings.minutes||120)/total):0;
-  let h='<section class="card"><div class="eyebrow">New session</div><h2 style="margin:4px 0 12px">Who is playing today?</h2>';
+  let h='<section class="card"><div class="eyebrow">New session</div><h2 style="margin:4px 0 12px">'+(u.eventId?'Confirm who is here':'Who is playing today?')+'</h2>';
+  if(u.eventId) h+='<p class="small muted" style="margin:-6px 0 12px">Pre-filled from the event registration. Untick anyone who did not show up, tick anyone who came without registering.</p>';
   h+='<div class="stack">';
   h+='<div class="row" style="gap:12px;align-items:end"><label class="field" style="flex:1">Date<input type="date" data-setup="date" value="'+u.date+'"></label>'
     +'<label class="field" style="width:150px">Games per player<select data-setup="target">'+[4,5,6,7,8].map(v=>'<option value="'+v+'"'+(v===u.target?' selected':'')+'>'+v+'</option>').join('')+'</select></label></div>';
@@ -465,6 +525,110 @@ function viewSession(s){
       h+='<div style="margin-top:12px"><p class="small muted" style="margin:0 0 8px">Tick who is here now. Games already played are kept; the rest are rebuilt for this group.</p><div class="pick">'
         +S.players.filter(p=>p.active!==false||sel.has(p.id)).map(p=>'<label><input type="checkbox" data-pick="'+p.id+'"'+(sel.has(p.id)?' checked':'')+'>'+esc(p.name)+'</label>').join('')
         +'</div><div class="actions" style="margin-top:10px"><button class="accent" data-act="players-yes">Apply and rebuild</button><button class="ghost" data-act="cancel">Cancel</button></div></div>';
+    }
+    h+='</section>';
+  }
+  return h;
+}
+
+/* --- Events --- */
+function eventCard(e,o){
+  o=o||{};
+  const regs=regList(e), cap=e.max>0?e.max:0;
+  const playing=cap?regs.slice(0,cap):regs, wait=cap?regs.slice(cap):[];
+  const closed=e.status==='closed', past=e.date<todayISO();
+  const meIn=ME&&regs.includes(ME);
+  let h='<section class="card"><div class="row between" style="align-items:flex-start">';
+  h+='<div class="evt"><div class="eyebrow">'+(closed?'Closed':past?'Past event':'Upcoming')+(e.sessionId?' · session started':'')+'</div>'
+    +'<div class="when">'+fmtDate(e.date)+(e.time?' · <span>'+fmtTime(e.time)+'</span>':'')+'</div>'
+    +(e.place?'<div class="where">'+esc(e.place)+'</div>':'')
+    +(e.note?'<div class="small" style="margin-top:4px">'+esc(e.note)+'</div>':'')+'</div>';
+  h+='<div class="count">'+playing.length+(cap?'<small>/ '+cap+'</small>':'<small>in</small>')+'</div></div>';
+  // registered list
+  h+='<div style="margin-top:14px">';
+  if(regs.length){
+    h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+esc(nameOf(p))+'</span>').join('')
+      +wait.map((p,i)=>'<span class="r wait'+(p===ME?' me':'')+'"><i>W'+(i+1)+'</i>'+esc(nameOf(p))+'</span>').join('')+'</div>';
+    if(wait.length) h+='<p class="small muted" style="margin:8px 0 0">'+wait.length+' on the waitlist — they move up automatically if someone drops out.</p>';
+  }else h+='<p class="muted" style="margin:0">Nobody registered yet. Be the first.</p>';
+  h+='</div>';
+  // registration controls
+  if(!closed&&!past&&canWrite()){
+    h+='<div style="margin-top:14px" class="stack">';
+    if(ME&&byId()[ME]&&!ui.pickMe){
+      h+='<div class="me-bar"><span>You are <b>'+esc(nameOf(ME))+'</b></span><button class="sm ghost" data-act="pick-me">Not you?</button></div>';
+      h+='<div class="actions">'+(meIn
+        ?'<button class="grow" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+ME+'">I can\'t make it</button>'
+        :'<button class="accent grow" data-act="reg-in" data-eid="'+e.id+'" data-pid="'+ME+'">I\'m in</button>')+'</div>';
+    }else{
+      h+='<div class="eyebrow">Tap your name</div><div class="names">'+S.players.filter(p=>p.active!==false).map(p=>'<button class="'+(regs.includes(p.id)?'in':'')+'" data-act="choose-me" data-eid="'+e.id+'" data-pid="'+p.id+'">'+esc(p.name)+(regs.includes(p.id)?' ✓':'')+'</button>').join('')+'</div>'
+        +'<form class="row" data-form="guest" data-eid="'+e.id+'"><input type="text" name="name" placeholder="Not on the list? Type your name" autocomplete="off" required><button type="submit">Add me</button></form>';
+    }
+    h+='</div>';
+  }
+  // share + organizer actions
+  if(!o.compact||true){
+    const txt=encodeURIComponent(inviteText(e));
+    h+='<div class="actions" style="margin-top:14px">'
+      +'<a class="wa" style="text-decoration:none;display:inline-flex;align-items:center;gap:6px;padding:9px 14px;border-radius:10px;font-weight:600" href="https://wa.me/?text='+txt+'" target="_blank" rel="noopener">Share on WhatsApp</a>'
+      +'<button data-act="copy-invite" data-eid="'+e.id+'">Copy invite</button>'
+      +(o.compact?'<button class="ghost" data-act="open-event" data-eid="'+e.id+'">Details</button>':'')
+      +'</div>';
+  }
+  h+='</section>';
+  return h;
+}
+function inviteText(e){
+  return 'BKC pickleball 🏓\n'+fmtDate(e.date)+(e.time?' at '+fmtTime(e.time):'')+(e.place?'\n'+e.place:'')+(e.note?'\n'+e.note:'')+(e.max>0?'\nSpots: '+e.max:'')+'\n\nRegister here (tap your name):\n'+eventUrl(e);
+}
+function eventForm(e){
+  const f=ui.eventForm||{};
+  const v=k=>esc(f[k]!=null?f[k]:(e&&e[k]!=null?e[k]:''));
+  const d=new Date(); const nextDefault=todayISO();
+  return '<form class="form" data-form="event" data-eid="'+(e?e.id:'')+'">'
+    +'<div class="two"><label class="field">Date<input type="date" name="date" required value="'+(v('date')||nextDefault)+'"></label>'
+    +'<label class="field">Time<input type="time" name="time" value="'+v('time')+'"></label></div>'
+    +'<label class="field">Place<input type="text" name="place" placeholder="Court / venue" value="'+v('place')+'"></label>'
+    +'<label class="field">Note (optional)<input type="text" name="note" placeholder="e.g. bring water, 2 hours" value="'+v('note')+'"></label>'
+    +'<label class="field" style="max-width:200px">Max players (0 = no limit)<input type="number" name="max" min="0" max="40" value="'+(v('max')||0)+'"></label>'
+    +'<div class="actions"><button class="primary" type="submit">'+(e?'Save changes':'Create event')+'</button>'+(e?'<button class="ghost" type="button" data-act="edit-event-off">Cancel</button>':'')+'</div></form>';
+}
+function viewEvents(){
+  if(mode==='pending') return '<section class="card"><div class="empty">Connecting to BKC…</div></section>';
+  const all=sortedEvents(), today=todayISO();
+  const up=all.filter(e=>e.status!=='closed'&&e.date>=today), past=all.filter(e=>!(e.status!=='closed'&&e.date>=today)).reverse();
+  let h='';
+  if(canWrite()) h+='<section class="card"><div class="eyebrow">New event</div><h2 style="margin:4px 0 12px">When are we playing?</h2>'+eventForm(null)+'</section>';
+  h+='<section class="card flat"><h3 style="padding:0 2px 8px">Upcoming</h3>';
+  if(!up.length) h+='<div class="empty" style="background:var(--surface);border:1px solid var(--line);border-radius:var(--r)">No upcoming events.</div>';
+  else h+='<div class="evlist">'+up.map(e=>evRow(e,false)).join('')+'</div>';
+  h+='</section>';
+  if(past.length){
+    h+='<section class="card flat"><h3 style="padding:0 2px 8px">Past</h3><div class="evlist">'+past.slice(0,12).map(e=>evRow(e,true)).join('')+'</div></section>';
+  }
+  return h;
+}
+function evRow(e,past){
+  const regs=regList(e), cap=e.max>0?e.max:0, n=cap?Math.min(regs.length,cap):regs.length;
+  return '<button class="ev'+(past?' past':'')+'" data-act="open-event" data-eid="'+e.id+'"><span><span class="t">'+fmtDate(e.date)+(e.time?' · '+fmtTime(e.time):'')+'</span><br><span class="s">'+(e.place?esc(e.place)+' · ':'')+n+' registered'+(cap&&regs.length>cap?' · '+(regs.length-cap)+' waiting':'')+(e.status==='closed'?' · closed':'')+'</span></span><span class="count">'+n+(cap?'<small>/ '+cap+'</small>':'')+'</span></button>';
+}
+function viewEvent(e){
+  let h='<p class="small" style="margin:0 0 10px"><button class="sm ghost" data-act="back-events">← All events</button></p>';
+  h+=eventCard(e,{});
+  if(canWrite()){
+    h+='<section class="card">';
+    if(ui.eventForm&&ui.eventForm.editing===e.id){ h+='<h3 style="margin-bottom:10px">Edit event</h3>'+eventForm(e); }
+    else{
+      const regs=regList(e), cap=e.max>0?e.max:0, playing=cap?regs.slice(0,cap):regs;
+      h+='<div class="eyebrow" style="margin-bottom:8px">Organizer</div><div class="actions">';
+      if(e.status!=='closed'&&playing.length>=4&&!currentSession()) h+='<button class="accent" data-act="from-event" data-eid="'+e.id+'">Start session with these '+playing.length+'</button>';
+      h+='<button data-act="edit-event" data-eid="'+e.id+'">Edit</button>';
+      h+=e.status==='closed'?'<button class="ghost" data-act="reopen-event" data-eid="'+e.id+'">Reopen registration</button>':'<button class="ghost" data-act="close-event" data-eid="'+e.id+'">Close registration</button>';
+      h+=ui.confirm==='delev:'+e.id
+        ?'<span class="small">Delete this event? <button class="sm danger" data-act="del-event-yes" data-eid="'+e.id+'">Delete</button> <button class="sm ghost" data-act="cancel">Cancel</button></span>'
+        :'<button class="ghost danger" data-act="del-event" data-eid="'+e.id+'">Delete</button>';
+      h+='</div>';
+      if(regs.length) h+='<p class="small muted" style="margin:10px 0 0">To remove someone who can\'t come, tap "Not you?", choose their name, then tap "I can\'t make it".</p>';
     }
     h+='</section>';
   }
@@ -575,7 +739,7 @@ function viewPlayers(){
 
 /* ---------- events ---------- */
 document.addEventListener('click',e=>{
-  const tab=e.target.closest('[data-tab]'); if(tab){ui.tab=tab.dataset.tab;ui.confirm=null;try{sessionStorage.setItem('bkc-tab',ui.tab);}catch(x){};render();return;}
+  const tab=e.target.closest('[data-tab]'); if(tab){ui.tab=tab.dataset.tab;ui.confirm=null; if(ui.tab==='events'){ui.eventId=null;ui.eventForm=null; if(location.hash) history.replaceState(null,'',location.pathname+location.search);}try{sessionStorage.setItem('bkc-tab',ui.tab);}catch(x){};render();return;}
   const rv=e.target.closest('[data-rv]'); if(rv){ui.ratingsView=rv.dataset.rv;render();return;}
   const gm=e.target.closest('[data-game]'); if(gm){ const s=currentSession(); if(!s) return; const g=s.games[gm.dataset.game]; if(!g) return; ui.editing={sid:s.id,gid:g.id,sa:g.sa==null?0:g.sa,sb:g.sb==null?0:g.sb}; render(); return; }
   const inc=e.target.closest('[data-inc]'); if(inc){ const [k,d]=inc.dataset.inc.split(':'); const key='s'+k; ui.editing[key]=Math.max(0,Math.min(40,ui.editing[key]+Number(d))); render(); return; }
@@ -592,6 +756,18 @@ document.addEventListener('change',e=>{
   if(t.dataset.setting){ const v=Number(t.value); if(v>0){ patch('settings',{[t.dataset.setting]:v}); toast('Saved'); } return; }
 });
 document.addEventListener('submit',e=>{
+  const gf=e.target.closest('[data-form="guest"]');
+  if(gf){ e.preventDefault(); const name=gf.name.value.trim(); if(!name) return;
+    const existing=S.players.find(p=>p.name.trim().toLowerCase()===name.toLowerCase());
+    let id; if(existing){ id=existing.id; } else { id=slug(name); const base=id; let k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
+      write('players',S.players.concat([{id,name,active:true}])); }
+    setMe(id); ui.pickMe=false; patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
+  const ef=e.target.closest('[data-form="event"]');
+  if(ef){ e.preventDefault(); const date=ef.date.value, time=ef.time.value||'', place=ef.place.value.trim(), note=ef.note.value.trim(), max=Math.max(0,Number(ef.max.value)||0);
+    if(!date) return;
+    if(ef.dataset.eid){ patch('events/'+ef.dataset.eid,{date,time,place,note,max}); ui.eventForm=null; toast('Event updated'); }
+    else { const id=date+'-'+Math.random().toString(36).slice(2,6); write('events/'+id,{id,date,time,place,note,max,status:'open',createdAt:Date.now(),regs:{}}); ui.eventId=id; ui.tab='events'; location.hash='event='+id; toast('Event created — share it!'); }
+    return; }
   const f=e.target.closest('[data-form="add"]'); if(!f) return; e.preventDefault();
   const name=f.name.value.trim(); if(!name) return;
   let id=slug(name), base=id, k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
@@ -611,7 +787,8 @@ function handle(act,btn){
       const date=ui.setup.date||todayISO(); let id=date, k=2; while(S.sessions[id]) id=date+'-'+(k++);
       const games={}; ui.preview.games.forEach(g=>games[g.id]=g);
       const session={id,date,createdAt:Date.now(),playerIds:ui.preview.ids.slice(),target:ui.setup.target,status:'open',games};
-      const target=ui.setup.target; ui.setup=null; ui.preview=null;
+      const target=ui.setup.target, eid=ui.setup.eventId; ui.setup=null; ui.preview=null; ui.manual=false;
+      if(eid&&S.events[eid]){ session.eventId=eid; patch('events/'+eid,{sessionId:id,status:'closed'}); }
       write('sessions/'+id,session); patch('settings',{target}); toast('Session started'); break; }
     case 'save-score': { const e=ui.editing; if(e.sa===e.sb) return; const g=S.sessions[e.sid].games[e.gid]; ui.editing=null;
       patch('sessions/'+e.sid+'/games/'+e.gid,{sa:e.sa,sb:e.sb,done:true,void:false,at:Date.now()}); toast('Game '+g.n+' saved'); break; }
@@ -635,6 +812,27 @@ function handle(act,btn){
     case 'reopen': { const t=S.sessions[btn.dataset.sid]; if(!t) return; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} patch('sessions/'+t.id,{status:'open'}); toast('Session reopened'); break; }
     case 'del': ui.confirm='del:'+btn.dataset.sid; render(); break;
     case 'del-yes': ui.confirm=null; write('sessions/'+btn.dataset.sid,null); toast('Session deleted'); break;
+    case 'manual': ui.manual=true; ui.setup=null; ui.preview=null; render(); break;
+    case 'manual-off': ui.manual=false; ui.setup=null; ui.preview=null; render(); break;
+    case 'go-new-event': ui.tab='events'; ui.eventId=null; try{sessionStorage.setItem('bkc-tab','events');}catch(x){} render(); break;
+    case 'from-event': { const e=S.events[btn.dataset.eid]; if(!e) return; const regs=regList(e), cap=e.max>0?e.max:0; const playing=cap?regs.slice(0,cap):regs;
+      ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
+    case 'pick-me': ui.pickMe=true; render(); break;
+    case 'choose-me': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; if(!e) return; setMe(pid); ui.pickMe=false;
+      if(!(e.regs||{})[pid]){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); } else render(); break; }
+    case 'reg-in': patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
+    case 'reg-out': patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:null}); toast('Removed from the list'); break;
+    case 'copy-invite': { const e=S.events[btn.dataset.eid]; if(!e) return; const txt=inviteText(e);
+      if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Invite copied'),()=>toast('Could not copy — use Share on WhatsApp'));
+      else toast('Copy not supported here — use Share on WhatsApp'); break; }
+    case 'open-event': ui.eventId=btn.dataset.eid; ui.tab='events'; ui.eventForm=null; try{sessionStorage.setItem('bkc-tab','events');}catch(x){} location.hash='event='+btn.dataset.eid; render(); window.scrollTo(0,0); break;
+    case 'back-events': ui.eventId=null; ui.eventForm=null; history.replaceState(null,'',location.pathname+location.search); render(); break;
+    case 'edit-event': ui.eventForm={editing:btn.dataset.eid}; render(); break;
+    case 'edit-event-off': ui.eventForm=null; render(); break;
+    case 'close-event': patch('events/'+btn.dataset.eid,{status:'closed'}); toast('Registration closed'); break;
+    case 'reopen-event': patch('events/'+btn.dataset.eid,{status:'open'}); toast('Registration reopened'); break;
+    case 'del-event': ui.confirm='delev:'+btn.dataset.eid; render(); break;
+    case 'del-event-yes': ui.confirm=null; ui.eventId=null; history.replaceState(null,'',location.pathname+location.search); write('events/'+btn.dataset.eid,null); toast('Event deleted'); break;
     case 'toggle': { const p=byId()[btn.dataset.pid]; if(!p) return; p.active=p.active===false; write('players',S.players); break; }
   }
 }
