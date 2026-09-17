@@ -237,7 +237,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 let S={players:[],settings:Object.assign({},SEED.settings),sessions:{},events:{},claims:{}};
 let mode='pending';   // 'pending' | 'live' | 'offline'
 let db=null, rootRef=null;
-const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false,addMode:false,pin:null,pinErr:false,profile:null,img:null,imgSid:null,imgTitle:'',openSid:null};
+const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false,addMode:false,pin:null,pinErr:false,profile:null,img:null,imgSid:null,imgTitle:'',openSid:null,suggest:null};
 try{ const t=sessionStorage.getItem('bkc-tab'); if(t) ui.tab=t; }catch(e){}
 let ME=null; try{ ME=localStorage.getItem('bkc-me'); }catch(e){}
 function readHash(){ const m=/event=([A-Za-z0-9_-]+)/.exec(location.hash||''); if(m){ ui.tab='events'; ui.eventId=m[1]; } }
@@ -263,9 +263,11 @@ const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=t
 const regList=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
 const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
 let DEVICE=null; try{ DEVICE=localStorage.getItem('bkc-device'); if(!DEVICE){ DEVICE='d'+Math.random().toString(36).slice(2,10)+Date.now().toString(36); localStorage.setItem('bkc-device',DEVICE); } }catch(e){ DEVICE='tmp'; }
-const claimOf=pid=>(S.claims||{})[pid]||null;
-const ownedByMe=pid=>claimOf(pid)===DEVICE;
-const lockedForMe=pid=>{ const c=claimOf(pid); return !!c&&c!==DEVICE; };
+const claimDevices=pid=>{ const c=(S.claims||{})[pid]; if(!c) return []; if(typeof c==='string') return [c]; if(c&&typeof c==='object') return Object.keys(c.devices||{}); return []; };
+const claimOf=pid=>claimDevices(pid).length?claimDevices(pid)[0]:null;
+const ownedByMe=pid=>claimDevices(pid).includes(DEVICE);
+const lockedForMe=pid=>{ const d=claimDevices(pid); return d.length>0&&!d.includes(DEVICE); };
+const claimWrite=pid=>{ const d=claimDevices(pid); const devices={}; d.forEach(x=>devices[x]=true); devices[DEVICE]=true; return patch('claims',{[pid]:{devices}}); };
 let ADMIN=null; try{ ADMIN=localStorage.getItem('bkc-admin'); }catch(e){}
 const pinSet=()=>!!(S.settings.adminPin&&String(S.settings.adminPin).length>=4);
 const isAdmin=()=>!pinSet()||(ADMIN!=null&&String(ADMIN)===String(S.settings.adminPin));
@@ -275,6 +277,15 @@ const mine=eid=>{ try{ return JSON.parse(localStorage.getItem(mineKey(eid))||'[]
 const addMine=(eid,pid)=>{ try{ const m=mine(eid); if(!m.includes(pid)){ m.push(pid); localStorage.setItem(mineKey(eid),JSON.stringify(m)); } }catch(e){} };
 const canUnreg=(eid,pid)=>isAdmin()||mine(eid).includes(pid);
 const unlockBtn=label=>'<button class="sm ghost" data-act="unlock">🔒 '+(label||'Organizer? Unlock')+'</button>';
+function similarName(a,b){
+  const na=a.toLowerCase().replace(/[^a-z]/g,''), nb=b.toLowerCase().replace(/[^a-z]/g,'');
+  if(!na||!nb) return false; if(na===nb) return true;
+  const fa=a.toLowerCase().trim().split(/\s+/)[0], fb=b.toLowerCase().trim().split(/\s+/)[0];
+  if(fa===fb) return true;
+  if(na.length>=4&&nb.length>=4&&(na.startsWith(nb.slice(0,4))||nb.startsWith(na.slice(0,4)))) return lev(na,nb)<=Math.max(2,Math.floor(Math.max(na.length,nb.length)/3));
+  return lev(na,nb)<=2;
+}
+function lev(a,b){ const m=a.length,n=b.length; if(!m) return n; if(!n) return m; let prev=Array.from({length:n+1},(_,i)=>i); for(let i=1;i<=m;i++){ const cur=[i]; for(let j=1;j<=n;j++){ cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1)); } prev=cur; } return prev[n]; }
 const setMe=id=>{ ME=id; try{ if(id) localStorage.setItem('bkc-me',id); else localStorage.removeItem('bkc-me'); }catch(x){} };
 function toast(msg){const t=$('#toast');t.textContent=msg;t.className='toast';t.hidden=false;clearTimeout(toast.h);toast.h=setTimeout(()=>t.hidden=true,2200);}
 function setChip(t){$('#hdr-chip').textContent=t;}
@@ -530,8 +541,8 @@ function render(){
   else if(ui.tab==='history') app.innerHTML=viewHistory();
   else if(ui.tab==='events') app.innerHTML=ui.eventId&&S.events[ui.eventId]?viewEvent(S.events[ui.eventId]):viewEvents();
   else app.innerHTML=viewPlayers();
-  $('#sheet').innerHTML=ui.editing?viewSheet():(ui.pin?viewPin():(ui.profile?viewProfile(ui.profile):(ui.img?viewImg():'')));
-  document.body.style.overflow=(ui.editing||ui.pin||ui.profile||ui.img)?'hidden':'';
+  $('#sheet').innerHTML=ui.editing?viewSheet():(ui.pin?viewPin():(ui.profile?viewProfile(ui.profile):(ui.img?viewImg():(ui.suggest?viewSuggest():''))));
+  document.body.style.overflow=(ui.editing||ui.pin||ui.profile||ui.img||ui.suggest)?'hidden':'';
 }
 function renderChip(){
   if(mode==='pending') setChip('Connecting…');
@@ -719,7 +730,7 @@ function eventCard(e,o){
         :'<button class="accent grow" data-act="reg-in" data-eid="'+e.id+'" data-pid="'+ME+'">I\'m in</button>')+'</div>';
     }else{
       const adding=!!ui.addMode&&isAdmin();
-      h+='<div class="row between"><div class="eyebrow">'+(adding?'Tap names to add them to the list':'Tap your name')+'</div>'+((ui.pickMe||adding)?'<button class="sm ghost" data-act="pick-done">Done</button>':'')+'</div><div class="names">'+S.players.filter(p=>p.active!==false).map(p=>{
+      h+='<div class="row between"><div class="eyebrow">'+(adding?'Tap names to add them to the list':'Tap your name')+'</div><span class="row" style="gap:4px">'+((ui.pickMe&&!adding&&ME)?'<button class="sm ghost" data-act="forget-me">Just browsing</button>':'')+((ui.pickMe||adding)?'<button class="sm ghost" data-act="pick-done">Done</button>':'')+'</span></div><div class="names">'+S.players.filter(p=>p.active!==false).map(p=>{
           const locked=lockedForMe(p.id)&&!adding;
           return '<button class="'+(regs.includes(p.id)?'in':'')+(locked?' locked':'')+'" '+(locked?'disabled title="Linked to another phone"':'')+' data-act="choose-me" data-eid="'+e.id+'" data-pid="'+p.id+'">'+esc(p.name)+(regs.includes(p.id)?' ✓':'')+(lockedForMe(p.id)?' <span class="lk">🔒</span>':'')+'</button>';
         }).join('')+'</div>'
@@ -799,6 +810,16 @@ function viewEvent(e){
     h+='</section>';
   }
   return h;
+}
+/* --- similar name suggestion --- */
+function viewSuggest(){
+  const s=ui.suggest;
+  return '<div class="sheet-bg" data-act="close-bg"><div class="sheet" role="dialog" aria-label="Is this you?">'
+    +'<div class="row between"><div><div class="eyebrow">Before adding "'+esc(s.name)+'"</div><h2>Is this you?</h2></div><button class="ghost sm" data-act="suggest-cancel">Close</button></div>'
+    +'<p class="small muted" style="margin:6px 0 12px">A similar name is already on the list. Tap it if it is you, so we don\'t create a duplicate.</p>'
+    +'<div class="names">'+s.matches.map(pid=>'<button class="'+(lockedForMe(pid)?'locked':'')+'" data-act="suggest-pick" data-eid="'+s.eid+'" data-pid="'+pid+'">'+esc(nameOf(pid))+(lockedForMe(pid)?' <span class="lk">🔒</span>':'')+'</button>').join('')+'</div>'
+    +'<div class="actions" style="margin-top:14px"><button class="ghost" data-act="suggest-new">No — add "'+esc(s.name)+'" as a new player</button></div>'
+    +'</div></div>';
 }
 /* --- image modal --- */
 function viewImg(){
@@ -952,9 +973,9 @@ function viewPlayers(){
   h+='<div class="plist">'+S.players.map(p=>'<div class="p'+(p.active===false?' off':'')+'">'
     +(adm?'<input type="text" value="'+esc(p.name)+'" data-rename="'+p.id+'" aria-label="Name">':'<span>'+esc(p.name)+'</span>')
     +'<span class="small muted">'+(p.active===false?'inactive':'')+'</span>'
-    +(adm?'<span class="row" style="gap:4px">'+(claimOf(p.id)?'<button class="sm ghost" data-act="unlink" data-pid="'+p.id+'" title="Let this name be claimed by a new phone">Unlink phone</button>':'<span class="small muted">no phone yet</span>')+'<button class="sm ghost" data-act="toggle" data-pid="'+p.id+'">'+(p.active===false?'Reactivate':'Set inactive')+'</button></span>':'')
+    +(adm?'<span class="row" style="gap:4px;flex-wrap:wrap;justify-content:flex-end">'+(claimDevices(p.id).length?'<span class="small muted">'+claimDevices(p.id).length+' device'+(claimDevices(p.id).length>1?'s':'')+(ownedByMe(p.id)?' · this one':'')+'</span><button class="sm ghost" data-act="unlink" data-pid="'+p.id+'" title="Remove all phone links so the name can be claimed again">Unlink</button>':'<span class="small muted">no phone yet</span>')+(ownedByMe(p.id)?'':'<button class="sm ghost" data-act="link-here" data-pid="'+p.id+'" title="Also link this name to the device you are using now">Link here</button>')+'<button class="sm ghost" data-act="toggle" data-pid="'+p.id+'">'+(p.active===false?'Reactivate':'Set inactive')+'</button></span>':'')
     +'</div>').join('')+'</div>';
-  if(adm) h+='<p class="small muted" style="margin:12px 0 0">Inactive players stay in the history and ratings but are not pre-selected for new sessions. Rename by editing the name and tapping away. "Unlink phone" lets someone who changed phones claim their name again.</p>';
+  if(adm) h+='<p class="small muted" style="margin:12px 0 0">Inactive players stay in the history and ratings but are not pre-selected for new sessions. Rename by editing the name and tapping away. <b>Unlink</b> lets someone who changed phones claim their name again; <b>Link here</b> adds the device you are using now (e.g. your computer) as a second device for that name.</p>';
   h+='</section>';
   // organizer section
   h+='<section class="card"><h3>Organizer</h3>';
@@ -1006,9 +1027,10 @@ document.addEventListener('submit',e=>{
   const gf=e.target.closest('[data-form="guest"]');
   if(gf){ e.preventDefault(); const name=gf.name.value.trim(); if(!name) return;
     const existing=S.players.find(p=>p.name.trim().toLowerCase()===name.toLowerCase());
+    if(!existing&&!gf.dataset.force){ const sim=S.players.filter(p=>p.active!==false&&similarName(p.name,name)); if(sim.length){ ui.suggest={eid:gf.dataset.eid,name,matches:sim.map(p=>p.id)}; render(); return; } }
     let id; if(existing){ id=existing.id; } else { id=slug(name); const base=id; let k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
       write('players',S.players.concat([{id,name,active:true}])); }
-    if(ui.addMode&&isAdmin()){ patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now(),by:'organizer'}}); toast('Added '+name); return; } if(lockedForMe(id)){ toast('That name is linked to another phone'); return; } if(!claimOf(id)) patch('claims',{[id]:DEVICE}); setMe(id); ui.pickMe=false; addMine(gf.dataset.eid,id); patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
+    if(ui.addMode&&isAdmin()){ patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now(),by:'organizer'}}); toast('Added '+name); return; } if(lockedForMe(id)){ toast('That name is linked to another phone'); return; } if(!ownedByMe(id)) claimWrite(id); setMe(id); ui.pickMe=false; addMine(gf.dataset.eid,id); patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
   const ef=e.target.closest('[data-form="event"]');
   if(ef){ e.preventDefault(); if(!isAdmin()){ ui.pin={}; render(); return; } const date=ef.date.value, time=ef.time.value||'', place=ef.place.value.trim(), note=ef.note.value.trim(), max=Math.max(0,Number(ef.max.value)||0);
     if(!date) return;
@@ -1023,7 +1045,7 @@ document.addEventListener('submit',e=>{
 });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&(ui.editing||ui.pin||ui.profile||ui.img)){ui.editing=null;ui.pin=null;ui.profile=null;ui.img=null;render();} });
 
-const ADMIN_ACTS=new Set(['unlink','gen','start','finish','finish-yes','regen','regen-yes','edit-players','players-yes','add-game','reopen','del','del-yes','manual','go-new-event','from-event','edit-event','close-event','reopen-event','del-event','del-event-yes','toggle']);
+const ADMIN_ACTS=new Set(['unlink','link-here','gen','start','finish','finish-yes','regen','regen-yes','edit-players','players-yes','add-game','reopen','del','del-yes','manual','go-new-event','from-event','edit-event','close-event','reopen-event','del-event','del-event-yes','toggle']);
 function handle(act,btn){
   const s=currentSession();
   if(act==='unlock'){ ui.pin={}; ui.pinErr=false; render(); return; }
@@ -1046,7 +1068,7 @@ function handle(act,btn){
     case 'clear-score': { const e=ui.editing; ui.editing=null; patch('sessions/'+e.sid+'/games/'+e.gid,{sa:null,sb:null,done:false,void:false}); toast('Score cleared'); break; }
     case 'void-game': { const e=ui.editing; const g=S.sessions[e.sid].games[e.gid]; ui.editing=null; const v=!g.void;
       patch('sessions/'+e.sid+'/games/'+e.gid,{void:v,done:v?true:(g.sa!=null)}); toast(v?'Game skipped':'Game restored'); break; }
-    case 'close': case 'close-bg': ui.editing=null; ui.pin=null; ui.profile=null; ui.img=null; render(); break;
+    case 'close': case 'close-bg': ui.editing=null; ui.pin=null; ui.profile=null; ui.img=null; ui.suggest=null; render(); break;
     case 'profile': ui.profile=btn.dataset.pid; render(); break;
     case 'copy-report': { const s2=S.sessions[btn.dataset.sid]; if(!s2) return; const txt=reportText(s2); if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Report copied'),()=>toast('Could not copy')); else toast('Copy not supported here'); break; }
     case 'report-img': { const s2=S.sessions[btn.dataset.sid]; if(!s2) return; renderReportCard(s2).then(url=>{ ui.img=url; ui.imgSid=s2.id; ui.imgTitle='Report card'; render(); }); break; }
@@ -1079,6 +1101,13 @@ function handle(act,btn){
     case 'from-event': { const e=S.events[btn.dataset.eid]; if(!e) return; const regs=regList(e), cap=e.max>0?e.max:0; const playing=cap?regs.slice(0,cap):regs;
       ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
     case 'pick-me': ui.pickMe=true; render(); break;
+    case 'suggest-pick': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; ui.suggest=null; if(!e) return; if(lockedForMe(pid)&&!(ui.addMode&&isAdmin())){ toast(nameOf(pid)+' is linked to another phone'); render(); return; }
+      if(ui.addMode&&isAdmin()){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now(),by:'organizer'}}); toast('Added '+first(pid)); return; }
+      if(!ownedByMe(pid)) claimWrite(pid); setMe(pid); ui.pickMe=false; addMine(e.id,pid); patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); break; }
+    case 'suggest-new': { const s2=ui.suggest; ui.suggest=null; if(!s2) return; const f=document.createElement('form'); f.dataset.form='guest'; f.dataset.eid=s2.eid; f.dataset.force='1'; f.innerHTML='<input name="name">'; f.name.value=s2.name; document.body.appendChild(f); f.requestSubmit(); f.remove(); break; }
+    case 'suggest-cancel': ui.suggest=null; render(); break;
+    case 'forget-me': setMe(null); ui.pickMe=false; render(); toast('This device no longer has a name'); break;
+    case 'link-here': { const pid=btn.dataset.pid; if(!isAdmin()) return; claimWrite(pid); setMe(pid); toast(nameOf(pid)+' is now also linked to this device'); break; }
     case 'add-mode': ui.addMode=true; ui.pickMe=false; render(); break;
     case 'pick-done': ui.addMode=false; ui.pickMe=false; render(); break;
     case 'choose-me': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; if(!e) return;
@@ -1088,11 +1117,11 @@ function handle(act,btn){
         else { patch('events/'+e.id+'/regs',{[pid]:null}); toast('Removed '+first(pid)); }
         return; }
       if(lockedForMe(pid)){ toast(nameOf(pid)+' is linked to another phone'); return; }
-      if(!claimOf(pid)) patch('claims',{[pid]:DEVICE});
+      if(!ownedByMe(pid)) claimWrite(pid);
       setMe(pid); ui.pickMe=false;
       if(!(e.regs||{})[pid]){ addMine(e.id,pid); patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); } else render(); break; }
     case 'unlink': patch('claims',{[btn.dataset.pid]:null}); toast('Phone unlinked — they can claim the name again'); break;
-    case 'reg-in': if(lockedForMe(btn.dataset.pid)&&!isAdmin()){ setMe(null); ui.pickMe=true; render(); toast('This name is now linked to another phone'); return; } if(!claimOf(btn.dataset.pid)) patch('claims',{[btn.dataset.pid]:DEVICE}); addMine(btn.dataset.eid,btn.dataset.pid); patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
+    case 'reg-in': if(lockedForMe(btn.dataset.pid)&&!isAdmin()){ setMe(null); ui.pickMe=true; render(); toast('This name is now linked to another phone'); return; } if(!ownedByMe(btn.dataset.pid)) claimWrite(btn.dataset.pid); addMine(btn.dataset.eid,btn.dataset.pid); patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
     case 'reg-out': if(!canUnreg(btn.dataset.eid,btn.dataset.pid)){ toast('Only the organizer can remove others'); return; } patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:null}); toast('Removed from the list'); break;
     case 'copy-invite': { const e=S.events[btn.dataset.eid]; if(!e) return; const txt=inviteText(e);
       if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Invite copied'),()=>toast('Could not copy — use Share on WhatsApp'));
