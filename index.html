@@ -215,6 +215,7 @@ form[data-form=guest] button{white-space:nowrap}
 <div id="toast" hidden></div>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script>
 (function(){
 'use strict';
@@ -316,8 +317,14 @@ function boot(){
   render();
   try{
     firebase.initializeApp(firebaseConfig);
-    db=firebase.database(); rootRef=db.ref(ROOT);
   }catch(e){ console.error(e); setBanner('Could not reach the BKC database. Check your connection and reload.'); return; }
+  // Silent anonymous sign-in: players see nothing, but the database only accepts signed-in visitors.
+  firebase.auth().signInAnonymously()
+    .then(startSync)
+    .catch(err=>{ console.error(err); setBanner('Could not sign in to the BKC database. Check your connection and reload.'); });
+}
+function startSync(){
+  db=firebase.database(); rootRef=db.ref(ROOT);
   db.ref('.info/connected').on('value',s=>{
     if(s.val()===true){ if(mode!=='pending') mode='live'; setBanner(''); }
     else if(mode!=='pending'){ mode='offline'; }
