@@ -102,6 +102,11 @@ nav.tabs button[aria-selected=true]{color:var(--court)}
 .game.void{opacity:.55;text-decoration:line-through}
 .sit{font-size:13px;color:var(--muted);padding:2px 10px 8px 58px}
 .sit b{color:var(--ink);font-weight:600}
+.rhead{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap;padding:10px 4px 2px;font-size:13px;color:var(--muted)}
+.rhead b{color:var(--ink);font-size:15px}
+.rhead .sat b{font-size:13px;font-weight:600}
+.game .n.ct{font-size:15px;letter-spacing:.02em}
+.game.next .n.ct{font-size:15px}
 /* tables */
 .tbl{width:100%;border-collapse:collapse;font-size:15px}
 .tbl th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:right;padding:6px 6px;border-bottom:1px solid var(--line);font-weight:600}
@@ -391,6 +396,101 @@ function fairness(ids,games){
   return {min:Math.min(...vals),max:Math.max(...vals),repeats,gp};
 }
 
+/* ---------- multi-court rounds ---------- */
+// How many courts can actually be filled, and how many rounds / games that means for a games-per-player target.
+function planFor(n,courts,target){
+  const C=Math.max(1,Math.min(courts||1,Math.floor(n/4)));
+  if(C<=1){ const g=n>=4?Math.round(n*target/4):0; return {C:1,rounds:g,games:g,sit:Math.max(0,n-4)}; }
+  const rounds=Math.ceil(n*target/(4*C));
+  return {C,rounds,games:rounds*C,sit:n-4*C};
+}
+// A perfect rotation exists when the players exactly fill the courts (4C, partner rotation) or leave one out (4C+1, one sits each round).
+function perfectRounds(n,C){ return n===4*C+1?n:(n===4*C?n-1:0); }
+function shuffleArr(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+function pairings(arr){ if(!arr.length) return [[]]; const [h,...rest]=arr, out=[]; rest.forEach((x,i)=>{ pairings(rest.filter((_,j)=>j!==i)).forEach(m=>out.push([[h,x]].concat(m))); }); return out; }
+// ids: present players; courts: courts booked; rounds: rounds to create; prior: games already in this session; startN/startR: first game / round number
+function generateRounds(ids,courts,rounds,prior,startN,startR){
+  prior=prior||[]; startN=startN||1; startR=startR||1;
+  const n=ids.length, C=Math.max(1,Math.min(courts||1,Math.floor(n/4)));
+  if(n<4||rounds<=0) return [];
+  const idx=Object.fromEntries(ids.map((p,i)=>[p,i]));
+  // perfect cyclic design (only for a fresh schedule)
+  const cyc=prior.length?0:perfectRounds(n,C);
+  const design=[];
+  if(cyc){
+    for(let r=0;r<cyc;r++){
+      const teams=[];
+      if(n===4*C+1){ for(let i=1;i<=2*C;i++) teams.push([(r+i)%n,(r-i+n)%n]); }
+      else { const m=n-1; teams.push([m,r]); for(let i=1;i<=(m-1)/2;i++) teams.push([(r+i)%m,(r-i+m)%m]); }
+      design.push(teams);
+    }
+  }
+  const groupings=pairings([...Array(2*C).keys()]);            // ways to put 2C teams onto C courts
+  const teamSets=C===2?pairings([...Array(8).keys()]):null;      // all 105 ways to split 8 players into teams
+  const priorRounds=[]; { const by={}; prior.forEach((g,k)=>{ const key=g.r!=null?'r'+g.r:'g'+k; if(!by[key]){ by[key]=[]; priorRounds.push(by[key]); } by[key].push([g.a.map(p=>idx[p]).filter(x=>x!==undefined),g.b.map(p=>idx[p]).filter(x=>x!==undefined)]); }); }
+  let best=null,bestScore=Infinity; const t0=performance.now();
+  for(let it=0; it<400 && (it<12 || performance.now()-t0<450); it++){
+    const gp=new Array(n).fill(0),sat=new Array(n).fill(0),lastSat=new Array(n).fill(-99);
+    const part=ids.map(()=>new Array(n).fill(0)),opp=ids.map(()=>new Array(n).fill(0));
+    let R=0;
+    const play=games=>{ const on=new Set();
+      games.forEach(([a,b])=>{ a.concat(b).forEach(p=>{gp[p]++;on.add(p);}); [a,b].forEach(t=>{ if(t.length===2){part[t[0]][t[1]]++;part[t[1]][t[0]]++;} }); a.forEach(x=>b.forEach(y=>{opp[x][y]++;opp[y][x]++;})); });
+      for(let i=0;i<n;i++) if(!on.has(i)){ sat[i]++; lastSat[i]=R; } R++; };
+    priorRounds.forEach(play);
+    const oppCost=(a,b)=>opp[a[0]][b[0]]+opp[a[0]][b[1]]+opp[a[1]][b[0]]+opp[a[1]][b[1]];
+    const toCourts=teams=>{ let bg=null,bv=Infinity; groupings.forEach(gr=>{ const v=gr.reduce((s,[x,y])=>s+oppCost(teams[x],teams[y]),0)+Math.random()*0.5; if(v<bv){bv=v;bg=gr;} }); return bg.map(([x,y])=>[teams[x],teams[y]]); };
+    const perm=shuffleArr([...Array(n).keys()]);
+    const out=[];
+    for(let k=0;k<rounds;k++){
+      let games;
+      if(k<cyc){ games=toCourts(design[(k)%cyc].map(t=>t.map(i=>perm[i]))); }
+      else{
+        // who sits: fewest sit-outs so far sit next, never twice in a row if it can be helped
+        const order=[...Array(n).keys()].map(i=>({i,s:sat[i]*100-gp[i]*10+(lastSat[i]===R-1?60:0)+Math.random()*4})).sort((x,y)=>x.s-y.s);
+        const sitN=n-4*C, on=order.slice(sitN).map(x=>x.i);
+        // split the players on court into teams with the fewest repeat partners
+        let cands;
+        if(teamSets) cands=teamSets.map(ts=>ts.map(([x,y])=>[on[x],on[y]]));
+        else { cands=[]; for(let s=0;s<160;s++){ const sh=shuffleArr(on.slice()), ts=[]; for(let j=0;j<sh.length;j+=2) ts.push([sh[j],sh[j+1]]); cands.push(ts); } }
+        let bt=null,bv=Infinity;
+        cands.forEach(ts=>{ const v=ts.reduce((s,[x,y])=>s+part[x][y]*part[x][y]*4+part[x][y],0)+Math.random()*0.3; if(v<bv){bv=v;bt=ts;} });
+        games=toCourts(bt);
+      }
+      out.push(games); play(games);
+    }
+    let score=0;
+    for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){ score+=3*part[i][j]*part[i][j]+opp[i][j]*opp[i][j]; }
+    const mean=gp.reduce((a,b)=>a+b,0)/n; score+=6*gp.reduce((a,g)=>a+(g-mean)*(g-mean),0);
+    if(score<bestScore){ bestScore=score; best=out; }
+    if(cyc&&rounds<=cyc&&it>=12) break;
+  }
+  const res=[]; let num=startN;
+  best.forEach((games,k)=>games.forEach((g,c)=>{ res.push({id:gid(num),n:num,r:startR+k,c:c+1,a:g[0].map(i=>ids[i]),b:g[1].map(i=>ids[i]),sa:null,sb:null,done:false}); num++; }));
+  return res;
+}
+// Build a schedule for any number of courts (one court keeps the classic generator).
+function buildSchedule(ids,courts,target){
+  const p=planFor(ids.length,courts,target);
+  if(p.C<=1) return generateSchedule(ids,p.games);
+  return generateRounds(ids,p.C,p.rounds);
+}
+const courtsOf=s=>Math.max(1,Number(s&&s.courts)||1);
+const roundMode=(games,courts)=>courts>1&&games.some(g=>g.r!=null);
+// Render a list of games; with more than one court they are grouped by round with who sits out.
+function gamesHTML(games,ids,live,sid,courts){
+  if(!roundMode(games,courts)) return games.map(g=>gameRow(g,ids,live,sid)).join('');
+  const rounds=[], by={};
+  games.forEach(g=>{ const k=g.r!=null?g.r:'x'+g.n; if(!by[k]){ by[k]=[]; rounds.push(k); } by[k].push(g); });
+  let rn=0;
+  return rounds.map(k=>{
+    const gs=by[k].slice().sort((a,b)=>(a.c||0)-(b.c||0)); rn++;
+    const on=new Set(); gs.forEach(g=>g.a.concat(g.b).forEach(p=>on.add(p)));
+    const sit=ids.filter(p=>!on.has(p)), open=gs.some(g=>!g.done);
+    let h='<div class="rhead"><b>Round '+rn+'</b>'+(sit.length?'<span class="sat">'+(open?'Sitting':'Sat')+': <b>'+sit.map(p=>esc(first(p))).join(', ')+'</b></span>':'<span>Everyone plays</span>')+'</div>';
+    return h+gs.map(g=>gameRow(g,ids,live,sid,true)).join('');
+  }).join('');
+}
+
 /* ---------- ratings & standings ---------- */
 const START=1500;
 let _statsCache=null;
@@ -599,20 +699,31 @@ function viewPlay(){
 function viewSetup(){
   if(mode==='pending') return '<section class="card"><div class="empty">Connecting to BKC…</div></section>';
   if(!ui.setup){
-    ui.setup={date:todayISO(),sel:S.players.filter(p=>p.active!==false).map(p=>p.id),target:S.settings.target||6};
+    ui.setup={date:todayISO(),sel:S.players.filter(p=>p.active!==false).map(p=>p.id),target:S.settings.target||6,courts:S.settings.courts||1};
   }
   const u=ui.setup;
   const sel=new Set(u.sel);
-  const n=sel.size, total=n>=4?Math.round(n*u.target/4):0, perGame=total?Math.floor((S.settings.minutes||120)/total):0;
+  if(!u.courts) u.courts=S.settings.courts||1;
+  const n=sel.size, plan=planFor(n,u.courts,u.target), mins=S.settings.minutes||120, slots=plan.rounds, perGame=slots?Math.floor(mins/slots):0;
   let h='<section class="card"><div class="eyebrow">New session</div><h2 style="margin:4px 0 12px">'+(u.eventId?'Confirm who is here':'Who is playing today?')+'</h2>';
   if(u.eventId) h+='<p class="small muted" style="margin:-6px 0 12px">Pre-filled from the event registration. Untick anyone who did not show up, tick anyone who came without registering.</p>';
   h+='<div class="stack">';
-  h+='<div class="row" style="gap:12px;align-items:end"><label class="field" style="flex:1">Date<input type="date" data-setup="date" value="'+u.date+'"></label>'
-    +'<label class="field" style="width:150px">Games per player<select data-setup="target">'+[4,5,6,7,8].map(v=>'<option value="'+v+'"'+(v===u.target?' selected':'')+'>'+v+'</option>').join('')+'</select></label></div>';
+  h+='<div class="row" style="gap:12px;align-items:end"><label class="field" style="flex:1;min-width:0">Date<input type="date" data-setup="date" value="'+u.date+'"></label>'
+    +'<label class="field" style="width:72px;flex:none">Courts<select data-setup="courts">'+[1,2,3].map(v=>'<option value="'+v+'"'+(v===u.courts?' selected':'')+'>'+v+'</option>').join('')+'</select></label>'
+    +'<label class="field" style="width:96px;flex:none">Games each<select data-setup="target">'+[4,5,6,7,8,9,10,11,12].map(v=>'<option value="'+v+'"'+(v===u.target?' selected':'')+'>'+v+'</option>').join('')+'</select></label></div>';
   h+='<div class="row between"><span class="muted small">'+n+' selected</span><span class="row"><button class="sm ghost" data-act="sel-all">All</button><button class="sm ghost" data-act="sel-none">None</button></span></div>';
   h+='<div class="pick">'+S.players.filter(p=>p.active!==false||sel.has(p.id)).map(p=>'<label><input type="checkbox" data-pick="'+p.id+'"'+(sel.has(p.id)?' checked':'')+'>'+esc(p.name)+'</label>').join('')+'</div>';
   if(n>=4){
-    h+='<p class="small muted" style="margin:4px 0 0">'+total+' games on one court · about '+perGame+' min each in '+(S.settings.minutes||120)+' minutes'+(perGame<7?' — tight; consider fewer games per player':'')+'</p>';
+    if(plan.C<=1){
+      h+='<p class="small muted" style="margin:4px 0 0">'+plan.games+' games on one court · about '+perGame+' min each in '+mins+' minutes'+(perGame<7?' — tight; consider fewer games per player':'')+'</p>';
+      if(u.courts>1) h+='<p class="small" style="margin:4px 0 0">Need at least 8 players to use a second court — scheduling on one court.</p>';
+    }else{
+      h+='<p class="small muted" style="margin:4px 0 0">'+plan.rounds+' rounds on '+plan.C+' courts ('+plan.games+' games) · '+(plan.sit?plan.sit+' sit'+(plan.sit>1?'':'s')+' out each round':'nobody sits out')+' · about '+perGame+' min per round in '+mins+' minutes'+(perGame<9?' — tight; consider fewer games each':'')+'</p>';
+      if(plan.C<u.courts) h+='<p class="small" style="margin:4px 0 0">Only enough players for '+plan.C+' courts.</p>';
+      const pr=perfectRounds(n,plan.C);
+      if(pr&&plan.rounds!==pr) h+='<p class="small" style="margin:4px 0 0">Tip: choose <b>'+(n-1)+' games each</b> for a perfect rotation — everyone partners everyone exactly once'+(plan.sit?' and sits out once':'')+'.</p>';
+      else if(pr) h+='<p class="small" style="margin:4px 0 0">✓ Perfect rotation: everyone partners everyone exactly once'+(plan.sit?' and sits out once':'')+'.</p>';
+    }
   }else h+='<p class="small muted" style="margin:4px 0 0">Pick at least 4 players.</p>';
   h+='<div class="actions"><button class="primary grow" data-act="gen" '+(n<4?'disabled':'')+'>Build the schedule</button></div>';
   h+='</div></section>';
@@ -620,14 +731,14 @@ function viewSetup(){
     const pv=ui.preview, f=fairness(pv.ids,pv.games);
     h+='<section class="card"><div class="row between"><h2>Schedule preview</h2><button class="sm" data-act="gen">Shuffle</button></div>';
     h+='<p class="small muted" style="margin:6px 0 12px">'+pv.games.length+' games · everyone plays '+(f.min===f.max?f.min:f.min+'–'+f.max)+' · '+(f.repeats?f.repeats+' repeated partner pair'+(f.repeats>1?'s':''):'no repeated partners')+'</p>';
-    h+='<div class="stack" style="gap:6px">'+pv.games.map(g=>gameRow(g,pv.ids,false)).join('')+'</div>';
+    h+='<div class="stack" style="gap:6px">'+gamesHTML(pv.games,pv.ids,false,null,pv.courts||1)+'</div>';
     h+='<div class="actions" style="margin-top:14px"><button class="accent grow" data-act="start" '+(canWrite()?'':'disabled')+'>Start session</button></div></section>';
   }
   return h;
 }
 function teamHTML(t,cls){return '<span class="team '+(cls||'')+'">'+t.map(p=>esc(first(p))).join(' <span class="muted">&amp;</span> ')+'</span>';}
-function gameRow(g,ids,live,sid){
-  const sit=ids.filter(p=>!g.a.includes(p)&&!g.b.includes(p));
+function gameRow(g,ids,live,sid,court){
+  const sit=court?[]:ids.filter(p=>!g.a.includes(p)&&!g.b.includes(p));
   const aWon=g.done&&g.sa>g.sb, bWon=g.done&&g.sb>g.sa;
   let cls='game'+(g.done?' done':'')+(g.void?' void':'')+(g.next?' next':'');
   let score, pTag='';
@@ -641,7 +752,7 @@ function gameRow(g,ids,live,sid){
   else score=(live?'<span class="enter">'+(g.next?'Enter score':'Score')+'</span>':'')+pTag;
   const tag=live?'button':'div';
   let h='<'+tag+' class="'+cls+'" '+(live?'data-game="'+g.id+'"':'')+'>'
-    +'<span class="n num">'+g.n+'</span>'
+    +(court?'<span class="n num ct" title="Game '+g.n+'">C'+(g.c||1)+'</span>':'<span class="n num">'+g.n+'</span>')
     +'<span class="teams">'+teamHTML(g.a,aWon?'win':(bWon?'lose':''))+'<span class="vs">vs</span>'+teamHTML(g.b,bWon?'win':(aWon?'lose':''))+'</span>'
     +'<span class="score">'+score+'</span></'+tag+'>';
   if(sit.length&&!g.done) h+='<div class="sit">Sitting: <b>'+sit.map(p=>esc(first(p))).join(', ')+'</b></div>';
@@ -650,11 +761,11 @@ function gameRow(g,ids,live,sid){
 function viewSession(s){
   const games=gamesOf(s), ids=s.playerIds;
   const played=games.filter(g=>g.done).length, live=games.filter(g=>!g.void).length;
-  const nextG=games.find(g=>!g.done&&!g.void);
-  const rows=games.map(g=>Object.assign({},g,{next:nextG&&g.id===nextG.id}));
+  const nextG=games.find(g=>!g.done&&!g.void), courts=courtsOf(s), rm=roundMode(games,courts);
+  const rows=games.map(g=>Object.assign({},g,{next:nextG&&(rm?(!g.done&&!g.void&&g.r===nextG.r):g.id===nextG.id)}));
   let h='<section class="card">';
   h+='<div class="row between"><div><div class="eyebrow">Today · '+fmtDate(s.date)+'</div><h2 style="margin-top:2px">'+played+' of '+live+' games played</h2></div>'
-    +'<span class="chip" style="background:var(--surface2);color:var(--muted)">'+ids.length+' players</span></div>';
+    +'<span class="chip" style="background:var(--surface2);color:var(--muted)">'+ids.length+' players'+(courts>1?' · '+courts+' courts':'')+'</span></div>';
   h+='<div class="progress" style="margin:12px 0 4px"><i style="width:'+(live?Math.round(played/live*100):0)+'%"></i></div>';
   if(played===0) h+='<div class="actions" style="margin-top:12px"><button class="sm" data-act="lineup-img" data-sid="'+s.id+'">Line-up card</button></div>';
   h+='</section>';
@@ -668,11 +779,11 @@ function viewSession(s){
     h+='</tbody></table></div></section>';
   }
   h+='<section class="card flat"><div class="row between" style="padding:0 2px 8px"><h3>Games</h3>'+(canWrite()&&isAdmin()?'<button class="sm ghost" data-act="regen" title="Rebuild the games not yet played">Regenerate remaining</button>':'')+'</div>';
-  h+='<div class="stack" style="gap:6px">'+rows.map(g=>gameRow(g,ids,canWrite(),s.id)).join('')+'</div></section>';
+  h+='<div class="stack" style="gap:6px">'+gamesHTML(rows,ids,canWrite(),s.id,courts)+'</div></section>';
   if(canWrite()&&!isAdmin()) h+='<section class="card"><div class="row between"><span class="small muted">Tap any game to enter its score. Organizer tools are locked.</span>'+unlockBtn()+'</div></section>';
   if(canWrite()&&isAdmin()){
     h+='<section class="card"><div class="actions">'
-      +'<button class="grow" data-act="add-game">Add a game</button>'
+      +'<button class="grow" data-act="add-game">'+(rm?'Add a round':'Add a game')+'</button>'
       +'<button class="grow" data-act="edit-players">Change players</button>'
       +'<button class="primary grow" data-act="finish">'+(played===live?'Finish session':'Finish early')+'</button></div>';
     if(ui.confirm==='finish') h+='<p class="small" style="margin:12px 0 0">Finish and lock this session? Unplayed games will be dropped. <button class="sm accent" data-act="finish-yes">Yes, finish</button> <button class="sm ghost" data-act="cancel">Cancel</button></p>';
@@ -964,7 +1075,7 @@ function viewHistory(){
       h+='</tbody></table></div>';
     }
     h+=reportBlock(s);
-    h+='<div class="stack" style="gap:6px">'+games.map(g=>gameRow(g,s.playerIds,false,s.id)).join('')+'</div>';
+    h+='<div class="stack" style="gap:6px">'+gamesHTML(games,s.playerIds,false,s.id,courtsOf(s))+'</div>';
     if(canWrite()&&isAdmin()){
       h+='<div class="actions">'+(s.status!=='open'?'<button class="sm" data-act="reopen" data-sid="'+s.id+'">Reopen to fix scores</button>':'')
         +(ui.confirm==='del:'+s.id?'<span class="small">Delete this whole session? <button class="sm danger" data-act="del-yes" data-sid="'+s.id+'">Delete</button> <button class="sm ghost" data-act="cancel">Cancel</button></span>':'<button class="sm ghost danger" data-act="del" data-sid="'+s.id+'">Delete</button>')+'</div>';
@@ -1019,7 +1130,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('change',e=>{
   const t=e.target;
-  if(t.dataset.setup){ if(t.dataset.setup==='date') ui.setup.date=t.value; else ui.setup.target=Number(t.value); ui.preview=null; render(); return; }
+  if(t.dataset.setup){ if(t.dataset.setup==='date') ui.setup.date=t.value; else if(t.dataset.setup==='courts') ui.setup.courts=Number(t.value); else ui.setup.target=Number(t.value); ui.preview=null; render(); return; }
   if(t.dataset.pick){ if(!ui.setup){ const cs=currentSession(); ui.setup={sel:cs?cs.playerIds.slice():[]}; } const list=ui.setup.sel; const i=list.indexOf(t.dataset.pick); if(t.checked&&i<0) list.push(t.dataset.pick); if(!t.checked&&i>=0) list.splice(i,1); ui.preview=null; render(); return; }
   if(t.dataset.rename!==undefined){ if(!isAdmin()) return; const p=byId()[t.dataset.rename]; const v=t.value.trim(); if(p&&v&&v!==p.name){ p.name=v; write('players',S.players); toast('Renamed'); } else render(); return; }
   if(t.dataset.setting){ if(!isAdmin()) return; const v=Number(t.value); if(v>0){ patch('settings',{[t.dataset.setting]:v}); toast('Saved'); } return; }
@@ -1061,15 +1172,16 @@ function handle(act,btn){
   switch(act){
     case 'sel-all': ui.setup.sel=S.players.filter(p=>p.active!==false).map(p=>p.id); ui.preview=null; render(); break;
     case 'sel-none': ui.setup.sel=[]; ui.preview=null; render(); break;
-    case 'gen': { const ids=ui.setup.sel.slice(); const total=Math.round(ids.length*ui.setup.target/4); ui.preview={ids,games:generateSchedule(ids,total)}; render(); requestAnimationFrame(()=>{const el=document.querySelector('section.card:nth-of-type(2)'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'});}); break; }
+    case 'gen': { const ids=ui.setup.sel.slice(); const courts=ui.setup.courts||1; ui.preview={ids,courts:planFor(ids.length,courts,ui.setup.target).C,games:buildSchedule(ids,courts,ui.setup.target)}; render(); requestAnimationFrame(()=>{const el=document.querySelector('section.card:nth-of-type(2)'); if(el) el.scrollIntoView({behavior:'smooth',block:'start'});}); break; }
     case 'start': {
       if(!ui.preview) return;
       const date=ui.setup.date||todayISO(); let id=date, k=2; while(S.sessions[id]) id=date+'-'+(k++);
       const games={}; ui.preview.games.forEach(g=>games[g.id]=g);
-      const session={id,date,createdAt:Date.now(),playerIds:ui.preview.ids.slice(),target:ui.setup.target,status:'open',games};
+      const courts=ui.setup.courts||1;
+      const session={id,date,createdAt:Date.now(),playerIds:ui.preview.ids.slice(),target:ui.setup.target,courts,status:'open',games};
       const target=ui.setup.target, eid=ui.setup.eventId; ui.setup=null; ui.preview=null; ui.manual=false;
       if(eid&&S.events[eid]){ session.eventId=eid; patch('events/'+eid,{sessionId:id,status:'closed'}); }
-      write('sessions/'+id,session); patch('settings',{target}); toast('Session started'); break; }
+      write('sessions/'+id,session); patch('settings',{target,courts}); toast('Session started'); break; }
     case 'save-score': { const e=ui.editing; if(e.sa===e.sb) return; const g=S.sessions[e.sid].games[e.gid]; ui.editing=null;
       patch('sessions/'+e.sid+'/games/'+e.gid,{sa:e.sa,sb:e.sb,done:true,void:false,at:Date.now()}); toast('Game '+g.n+' saved'); break; }
     case 'clear-score': { const e=ui.editing; ui.editing=null; patch('sessions/'+e.sid+'/games/'+e.gid,{sa:null,sb:null,done:false,void:false}); toast('Score cleared'); break; }
@@ -1097,6 +1209,9 @@ function handle(act,btn){
     case 'players-yes': { if(!s) return; const ids=ui.setup.sel.slice(); if(ids.length<4){toast('Need at least 4 players');return;} rebuildRemaining(s,ids); break; }
     case 'add-game': {
       if(!s) return; const games=gamesOf(s); const prior=games.filter(g=>g.done&&!g.void); const n=games.length?games[games.length-1].n+1:1;
+      const C=planFor(s.playerIds.length,courtsOf(s),1).C;
+      if(C>1){ const rr0=games.reduce((m,g)=>Math.max(m,g.r||0),0)+1; const add=generateRounds(s.playerIds,C,1,prior.concat(games.filter(g=>!g.done)),n,rr0); if(!add.length) return;
+        const upd={}; add.forEach(g=>upd[g.id]=g); patch('sessions/'+s.id+'/games',upd); toast('Round added'); break; }
       const g=generateSchedule(s.playerIds,1,prior.concat(games.filter(g=>!g.done)),n)[0]; if(!g) return;
       write('sessions/'+s.id+'/games/'+g.id,g); toast('Game '+g.n+' added'); break; }
     case 'reopen': { const t=S.sessions[btn.dataset.sid]; if(!t) return; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} patch('sessions/'+t.id,{status:'open'}); toast('Session reopened'); break; }
@@ -1106,7 +1221,7 @@ function handle(act,btn){
     case 'manual-off': ui.manual=false; ui.setup=null; ui.preview=null; render(); break;
     case 'go-new-event': ui.tab='events'; ui.eventId=null; try{sessionStorage.setItem('bkc-tab','events');}catch(x){} render(); break;
     case 'from-event': { const e=S.events[btn.dataset.eid]; if(!e) return; const regs=regList(e), cap=e.max>0?e.max:0; const playing=cap?regs.slice(0,cap):regs;
-      ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
+      ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,courts:S.settings.courts||1,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
     case 'pick-me': ui.pickMe=true; render(); break;
     case 'suggest-pick': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; ui.suggest=null; if(!e) return; if(lockedForMe(pid)&&!(ui.addMode&&isAdmin())){ toast(nameOf(pid)+' is linked to another phone'); render(); return; }
       if(ui.addMode&&isAdmin()){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now(),by:'organizer'}}); toast('Added '+first(pid)); return; }
@@ -1258,10 +1373,12 @@ function rebuildRemaining(s,ids){
   const target=s.target||S.settings.target||6;
   const counts={}; ids.forEach(p=>counts[p]=0); played.forEach(g=>[...g.a,...g.b].forEach(p=>{ if(p in counts) counts[p]++; }));
   const deficit=ids.reduce((a,p)=>a+Math.max(0,target-counts[p]),0);
-  const remaining=Math.max(1,Math.round(deficit/4));
   const keep={}; games.filter(g=>g.done).forEach(g=>keep[g.id]=g);
   const startN=games.filter(g=>g.done).length?Math.max(...games.filter(g=>g.done).map(g=>g.n))+1:1;
-  const fresh=generateSchedule(ids,remaining,played,startN);
+  const C=planFor(ids.length,courtsOf(s),target).C;
+  let fresh;
+  if(C>1){ const startR=games.filter(g=>g.done).reduce((m,g)=>Math.max(m,g.r||0),0)+1; fresh=generateRounds(ids,C,Math.max(1,Math.ceil(deficit/(4*C))),played,startN,startR); }
+  else fresh=generateSchedule(ids,Math.max(1,Math.round(deficit/4)),played,startN);
   fresh.forEach(g=>keep[g.id]=g);
   ui.confirm=null; ui.setup=null;
   patch('sessions/'+s.id,{games:keep,playerIds:ids}); toast('Schedule rebuilt');
