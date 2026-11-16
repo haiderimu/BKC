@@ -243,7 +243,7 @@ const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'
 let S={players:[],settings:Object.assign({},SEED.settings),sessions:{},events:{},claims:{}};
 let mode='pending';   // 'pending' | 'live' | 'offline'
 let db=null, rootRef=null;
-const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false,addMode:false,pin:null,pinErr:false,profile:null,img:null,imgSid:null,imgTitle:'',openSid:null,suggest:null};
+const ui={tab:'play',setup:null,preview:null,editing:null,confirm:null,ratingsView:'rating',eventId:null,eventForm:null,manual:false,pickMe:false,addMode:false,pin:null,pinErr:false,profile:null,img:null,imgSid:null,imgTitle:'',openSid:null,suggest:null,sid:null,newSession:false};
 try{ const t=sessionStorage.getItem('bkc-tab'); if(t) ui.tab=t; }catch(e){}
 let ME=null; try{ ME=localStorage.getItem('bkc-me'); }catch(e){}
 function readHash(){ const m=/event=([A-Za-z0-9_-]+)/.exec(location.hash||''); if(m){ ui.tab='events'; ui.eventId=m[1]; } }
@@ -265,6 +265,7 @@ const gamesOf=s=>Object.values(s.games||{}).sort((a,b)=>a.n-b.n);
 const gid=n=>'g'+String(n).padStart(2,'0');
 const fmtTime=t=>{ if(!t) return ''; const [hh,mm]=t.split(':').map(Number); const d=new Date(2000,0,1,hh,mm); return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); };
 const sortedEvents=()=>Object.values(S.events).sort((a,b)=>(a.date+(a.time||''))<(b.date+(b.time||''))?-1:1);
+const startableEvents=()=>sortedEvents().filter(e=>e.date>=todayISO()&&!(e.sessionId&&S.sessions&&S.sessions[e.sessionId]));
 const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=todayISO());
 const regList=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
 const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
@@ -634,9 +635,19 @@ function spark(hist){
 }
 
 /* ---------- current session ---------- */
+function openSessions(){ return sortedSessions().filter(s=>s.status==='open'); }
 function currentSession(){
-  const open=sortedSessions().filter(s=>s.status==='open');
-  return open.length?open[open.length-1]:null;
+  const open=openSessions(); if(!open.length) return null;
+  return (ui.sid&&open.find(s=>s.id===ui.sid))||open[open.length-1];
+}
+function sessLabel(s,i){ const ev=s.eventId&&S.events&&S.events[s.eventId]; return (ev&&ev.place?ev.place:'Session '+(i+1))+(ev&&ev.time?' · '+fmtTime(ev.time):''); }
+function sessionSwitcher(cur){
+  const open=openSessions(), admin=isAdmin()&&canWrite();
+  if(open.length<2&&!admin) return '';
+  let h='<section class="card flat"><div class="actions" style="flex-wrap:wrap;margin:0">';
+  open.forEach((x,i)=>{ const on=cur&&x.id===cur.id&&!ui.newSession; h+='<button class="sm'+(on?' accent':' ghost')+'" data-act="pick-session" data-sid="'+x.id+'">'+esc(sessLabel(x,i))+'</button>'; });
+  if(admin) h+='<button class="sm'+(ui.newSession?' accent':'')+'" data-act="new-session">+ New session</button>';
+  return h+'</div></section>';
 }
 
 /* ---------- rendering ---------- */
@@ -672,9 +683,12 @@ const canWrite=()=>mode!=='pending';
 /* --- Play tab --- */
 function viewPlay(){
   const s=currentSession();
-  if(s) return viewSession(s);
+  if(s&&!ui.newSession) return sessionSwitcher(s)+viewSession(s);
+  return (s?sessionSwitcher(s):'')+viewPlayStart();
+}
+function viewPlayStart(){
   if(mode==='pending') return '<section class="card"><div class="empty">Connecting to BKC…</div></section>';
-  const up=upcomingEvents();
+  const up=startableEvents();
   if(!ui.manual&&up.length){
     const e=up[0];
     const regs=regList(e), cap=e.max>0?e.max:0, playing=cap?regs.slice(0,cap):regs;
@@ -915,7 +929,7 @@ function viewEvent(e){
     else{
       const regs=regList(e), cap=e.max>0?e.max:0, playing=cap?regs.slice(0,cap):regs;
       h+='<div class="eyebrow" style="margin-bottom:8px">Organizer</div><div class="actions">';
-      if(e.status!=='closed'&&playing.length>=4&&!currentSession()) h+='<button class="accent" data-act="from-event" data-eid="'+e.id+'">Start session with these '+playing.length+'</button>';
+      if(playing.length>=4&&!(e.sessionId&&S.sessions[e.sessionId])) h+='<button class="accent" data-act="from-event" data-eid="'+e.id+'">Start session with these '+playing.length+'</button>';
       h+='<a class="wa" style="text-decoration:none;display:inline-flex;align-items:center;padding:9px 14px;border-radius:10px;font-weight:600" href="https://wa.me/?text='+encodeURIComponent(reminderText(e))+'" target="_blank" rel="noopener">Send reminder</a>';
       h+='<button data-act="edit-event" data-eid="'+e.id+'">Edit</button>';
       h+=e.status==='closed'?'<button class="ghost" data-act="reopen-event" data-eid="'+e.id+'">Reopen registration</button>':'<button class="ghost" data-act="close-event" data-eid="'+e.id+'">Close registration</button>';
@@ -1163,7 +1177,7 @@ document.addEventListener('submit',e=>{
 });
 document.addEventListener('keydown',e=>{ if(e.key==='Escape'&&(ui.editing||ui.pin||ui.profile||ui.img)){ui.editing=null;ui.pin=null;ui.profile=null;ui.img=null;render();} });
 
-const ADMIN_ACTS=new Set(['unlink','link-here','gen','start','finish','finish-yes','regen','regen-yes','edit-players','players-yes','add-game','reopen','del','del-yes','manual','go-new-event','from-event','edit-event','close-event','reopen-event','del-event','del-event-yes','toggle']);
+const ADMIN_ACTS=new Set(['unlink','link-here','gen','start','finish','finish-yes','regen','regen-yes','edit-players','players-yes','add-game','reopen','del','del-yes','manual','go-new-event','from-event','edit-event','close-event','reopen-event','del-event','del-event-yes','toggle','new-session']);
 function handle(act,btn){
   const s=currentSession();
   if(act==='unlock'){ ui.pin={}; ui.pinErr=false; render(); return; }
@@ -1181,7 +1195,7 @@ function handle(act,btn){
       const session={id,date,createdAt:Date.now(),playerIds:ui.preview.ids.slice(),target:ui.setup.target,courts,status:'open',games};
       const target=ui.setup.target, eid=ui.setup.eventId; ui.setup=null; ui.preview=null; ui.manual=false;
       if(eid&&S.events[eid]){ session.eventId=eid; patch('events/'+eid,{sessionId:id,status:'closed'}); }
-      write('sessions/'+id,session); patch('settings',{target,courts}); toast('Session started'); break; }
+      ui.sid=id; ui.newSession=false; write('sessions/'+id,session); patch('settings',{target,courts}); toast('Session started'); break; }
     case 'save-score': { const e=ui.editing; if(e.sa===e.sb) return; const g=S.sessions[e.sid].games[e.gid]; ui.editing=null;
       patch('sessions/'+e.sid+'/games/'+e.gid,{sa:e.sa,sb:e.sb,done:true,void:false,at:Date.now()}); toast('Game '+g.n+' saved'); break; }
     case 'clear-score': { const e=ui.editing; ui.editing=null; patch('sessions/'+e.sid+'/games/'+e.gid,{sa:null,sb:null,done:false,void:false}); toast('Score cleared'); break; }
@@ -1201,7 +1215,7 @@ function handle(act,btn){
     case 'cancel': ui.confirm=null; ui.setup=null; render(); break;
     case 'finish': ui.confirm='finish'; render(); break;
     case 'finish-yes': { if(!s) return; const upd={status:'closed',closedAt:Date.now()}; Object.keys(s.games).forEach(k=>{ if(!s.games[k].done) upd['games/'+k]=null; });
-      ui.confirm=null; ui.tab='history'; ui.openSid=s.id; try{sessionStorage.setItem('bkc-tab','history');}catch(x){}
+      ui.confirm=null; ui.sid=null; ui.newSession=false; ui.tab='history'; ui.openSid=s.id; try{sessionStorage.setItem('bkc-tab','history');}catch(x){}
       patch('sessions/'+s.id,upd); toast('Session finished — share the match report'); window.scrollTo(0,0); break; }
     case 'regen': ui.confirm='regen'; render(); break;
     case 'regen-yes': if(s) rebuildRemaining(s,s.playerIds.slice()); break;
@@ -1214,14 +1228,16 @@ function handle(act,btn){
         const upd={}; add.forEach(g=>upd[g.id]=g); patch('sessions/'+s.id+'/games',upd); toast('Round added'); break; }
       const g=generateSchedule(s.playerIds,1,prior.concat(games.filter(g=>!g.done)),n)[0]; if(!g) return;
       write('sessions/'+s.id+'/games/'+g.id,g); toast('Game '+g.n+' added'); break; }
-    case 'reopen': { const t=S.sessions[btn.dataset.sid]; if(!t) return; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} patch('sessions/'+t.id,{status:'open'}); toast('Session reopened'); break; }
+    case 'reopen': { const t=S.sessions[btn.dataset.sid]; if(!t) return; ui.sid=t.id; ui.newSession=false; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} patch('sessions/'+t.id,{status:'open'}); toast('Session reopened'); break; }
     case 'del': ui.confirm='del:'+btn.dataset.sid; render(); break;
     case 'del-yes': ui.confirm=null; write('sessions/'+btn.dataset.sid,null); toast('Session deleted'); break;
     case 'manual': ui.manual=true; ui.setup=null; ui.preview=null; render(); break;
     case 'manual-off': ui.manual=false; ui.setup=null; ui.preview=null; render(); break;
     case 'go-new-event': ui.tab='events'; ui.eventId=null; try{sessionStorage.setItem('bkc-tab','events');}catch(x){} render(); break;
     case 'from-event': { const e=S.events[btn.dataset.eid]; if(!e) return; const regs=regList(e), cap=e.max>0?e.max:0; const playing=cap?regs.slice(0,cap):regs;
-      ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,courts:S.settings.courts||1,eventId:e.id}; ui.preview=null; ui.manual=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
+      ui.setup={date:e.date>=todayISO()?e.date:todayISO(),sel:playing.slice(),target:S.settings.target||6,courts:S.settings.courts||1,eventId:e.id}; ui.preview=null; ui.manual=true; ui.newSession=true; ui.tab='play'; try{sessionStorage.setItem('bkc-tab','play');}catch(x){} render(); window.scrollTo(0,0); break; }
+    case 'pick-session': ui.sid=btn.dataset.sid; ui.newSession=false; ui.manual=false; ui.setup=null; ui.preview=null; ui.confirm=null; render(); window.scrollTo(0,0); break;
+    case 'new-session': ui.newSession=true; ui.manual=false; ui.setup=null; ui.preview=null; ui.confirm=null; render(); window.scrollTo(0,0); break;
     case 'pick-me': ui.pickMe=true; render(); break;
     case 'suggest-pick': { const pid=btn.dataset.pid, e=S.events[btn.dataset.eid]; ui.suggest=null; if(!e) return; if(lockedForMe(pid)&&!(ui.addMode&&isAdmin())){ toast(nameOf(pid)+' is linked to another phone'); render(); return; }
       if(ui.addMode&&isAdmin()){ patch('events/'+e.id+'/regs',{[pid]:{at:Date.now(),by:'organizer'}}); toast('Added '+first(pid)); return; }
