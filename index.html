@@ -548,15 +548,24 @@ function winProb(sid,gid,a,b){
   const ta=a.reduce((x,p)=>x+(R[p]||START),0)/a.length, tb=b.reduce((x,p)=>x+(R[p]||START),0)/b.length;
   return 1/(1+Math.pow(10,(tb-ta)/400));
 }
-/* --- season points --- */
+/* --- fair ranking: adjusted win % ---
+   Everyone gets 2 phantom wins + 2 phantom losses, so a 2–0 day does not outrank 9–3,
+   and playing more games never helps unless you actually win them. */
+const PRIOR=2;
+const adjPct=(w,g)=>(w+PRIOR)/(g+2*PRIOR);
+const perGame=(pf,pa,g)=>g?(pf-pa)/g:0;
+const fairSort=(x,y)=>(adjPct(y.w,y.g)-adjPct(x.w,x.g))||(perGame(y.pf,y.pa,y.g)-perGame(x.pf,x.pa,x.g))||(y.w/(y.g||1)-x.w/(x.g||1))||nameOf(x.id).localeCompare(nameOf(y.id));
+const pctTxt=(w,g)=>g?Math.round(100*w/g)+'%':'—';
+const pgTxt=d=>(d>0?'+':'')+d.toFixed(1);
+/* --- season table --- */
 function seasonCfg(){ const s=S.settings.season||{}; const first=sortedSessions()[0]; return {name:s.name||'Season 1',start:s.start||(first?first.date:todayISO())}; }
 function seasonTable(){
   const {sessionInfo}=computeRatings(); const cfg=seasonCfg(); const t={};
   sortedSessions().filter(s=>s.date>=cfg.start).forEach(s=>{
     const info=sessionInfo[s.id]; if(!info) return;
-    info.standings.forEach(r=>{ const x=t[r.id]||(t[r.id]={id:r.id,pts:0,sessions:0,w:0,l:0,mvp:0}); x.sessions++; x.pts+=3+r.w; x.w+=r.w; x.l+=r.l; if(info.mvp===r.id){x.pts+=2;x.mvp++;} });
+    info.standings.forEach(r=>{ const x=t[r.id]||(t[r.id]={id:r.id,sessions:0,g:0,w:0,l:0,pf:0,pa:0,mvp:0}); x.sessions++; x.g+=r.g; x.w+=r.w; x.l+=r.l; x.pf+=r.pf; x.pa+=r.pa; if(info.mvp===r.id) x.mvp++; });
   });
-  return Object.values(t).sort((a,b)=>b.pts-a.pts||b.w-a.w||a.l-b.l||nameOf(a.id).localeCompare(nameOf(b.id)));
+  return Object.values(t).sort(fairSort);
 }
 /* --- highlights for a session --- */
 function sessionHighlights(s){
@@ -623,7 +632,7 @@ function dayStandings(s){
     g.a.forEach(p=>{const r=t[p]||(t[p]={id:p,g:0,w:0,l:0,pf:0,pa:0});r.g++;aWon?r.w++:r.l++;r.pf+=g.sa;r.pa+=g.sb;});
     g.b.forEach(p=>{const r=t[p]||(t[p]={id:p,g:0,w:0,l:0,pf:0,pa:0});r.g++;aWon?r.l++:r.w++;r.pf+=g.sb;r.pa+=g.sa;});
   });
-  return Object.values(t).sort((x,y)=>(y.w-x.w)||((y.pf-y.pa)-(x.pf-x.pa))||(y.pf-x.pf)||nameOf(x.id).localeCompare(nameOf(y.id)));
+  return Object.values(t).sort(fairSort);
 }
 function spark(hist){
   if(!hist||hist.length<2) return '';
@@ -787,9 +796,9 @@ function viewSession(s){
   // standings
   const st=dayStandings(s).filter(r=>r.g>0);
   if(st.length){
-    h+='<section class="card"><div class="row between"><h3>Standings today</h3><span class="small muted">wins, then point diff</span></div>';
-    h+='<div class="scroll"><table class="tbl" style="margin-top:8px"><thead><tr><th>#</th><th class="l">Player</th><th>W–L</th><th>+/−</th><th>Pts</th></tr></thead><tbody>';
-    st.forEach((r,i)=>{const d=r.pf-r.pa;h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name">'+esc(nameOf(r.id))+(i===0&&played===live&&live>0?'<span class="tag mvp">Day MVP</span>':'')+'</td><td class="num">'+r.w+'–'+r.l+'</td><td class="'+(d>0?'up':d<0?'down':'')+'">'+(d>0?'+':'')+d+'</td><td class="muted">'+r.pf+'</td></tr>';});
+    h+='<section class="card"><div class="row between"><h3>Standings today</h3><span class="small muted">win %, then +/− per game</span></div>';
+    h+='<div class="scroll"><table class="tbl" style="margin-top:8px"><thead><tr><th>#</th><th class="l">Player</th><th>W–L</th><th>Win%</th><th>+/− per game</th></tr></thead><tbody>';
+    st.forEach((r,i)=>{const d=perGame(r.pf,r.pa,r.g);h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name">'+esc(nameOf(r.id))+(i===0&&played===live&&live>0?'<span class="tag mvp">Day MVP</span>':'')+'</td><td class="num">'+r.w+'–'+r.l+'</td><td>'+pctTxt(r.w,r.g)+'</td><td class="'+(d>0?'up':d<0?'down':'')+'">'+pgTxt(d)+'</td></tr>';});
     h+='</tbody></table></div></section>';
   }
   h+='<section class="card flat"><div class="row between" style="padding:0 2px 8px"><h3>Games</h3>'+(canWrite()&&isAdmin()?'<button class="sm ghost" data-act="regen" title="Rebuild the games not yet played">Regenerate remaining</button>':'')+'</div>';
@@ -1002,7 +1011,7 @@ function viewRatings(){
     +'<span class="row" style="gap:4px"><button class="sm '+(ui.ratingsView==='rating'?'primary':'ghost')+'" data-rv="rating">Rating</button><button class="sm '+(ui.ratingsView==='record'?'primary':'ghost')+'" data-rv="record">Record</button><button class="sm '+(ui.ratingsView==='season'?'primary':'ghost')+'" data-rv="season">Season</button></span></div>';
   if(ui.ratingsView==='season') return h+seasonView()+'</section>'+ratingsLegend();
   if(!rows.length){ h+='<div class="empty">No games recorded yet. Ratings appear after your first session.</div></section>'; return h+ratingsLegend(); }
-  rows.sort((x,y)=>ui.ratingsView==='rating'?(y.r-x.r):((y.s.w/(y.s.g||1))-(x.s.w/(x.s.g||1))||(y.s.w-x.s.w)));
+  rows.sort((x,y)=>ui.ratingsView==='rating'?(y.r-x.r):fairSort({id:x.id,...x.s},{id:y.id,...y.s}));
   h+='<div class="scroll"><table class="tbl" style="margin-top:10px"><thead><tr><th>#</th><th class="l">Player</th>';
   if(ui.ratingsView==='rating') h+='<th>Rating</th><th>Last</th><th>Trend</th><th>W–L</th>';
   else h+='<th>W–L</th><th>Win%</th><th>+/− per game</th><th>Streak</th>';
@@ -1023,7 +1032,7 @@ function viewRatings(){
   // best partnerships
   const pairs={};
   rows.forEach(x=>Object.entries(x.s.partners).forEach(([m,v])=>{const k=[x.id,m].sort().join('|');pairs[k]=v;}));
-  const top=Object.entries(pairs).filter(([,v])=>v.g>=3).sort((a,b)=>(b[1].w/b[1].g)-(a[1].w/a[1].g)||b[1].g-a[1].g).slice(0,5);
+  const top=Object.entries(pairs).filter(([,v])=>v.g>=3).sort((a,b)=>adjPct(b[1].w,b[1].g)-adjPct(a[1].w,a[1].g)||b[1].g-a[1].g).slice(0,5);
   if(top.length){
     h+='<section class="card"><h3>Best partnerships</h3><p class="small muted" style="margin:2px 0 8px">Pairs with at least 3 games together</p><table class="tbl"><tbody>';
     top.forEach(([k,v])=>{const [p,q]=k.split('|');h+='<tr><td class="l name">'+esc(first(p))+' &amp; '+esc(first(q))+'</td><td class="num">'+v.w+'–'+(v.g-v.w)+'</td><td>'+Math.round(100*v.w/v.g)+'%</td></tr>';});
@@ -1033,10 +1042,10 @@ function viewRatings(){
 }
 function seasonView(){
   const cfg=seasonCfg(), rows=seasonTable();
-  let h='<p class="small muted" style="margin:6px 0 10px">'+esc(cfg.name)+' · since '+fmtDate(cfg.start)+' · 3 pts per session played, 1 per win, 2 for Day MVP</p>';
+  let h='<p class="small muted" style="margin:6px 0 10px">'+esc(cfg.name)+' · since '+fmtDate(cfg.start)+' · ranked by win % (adjusted for games played), then +/− per game</p>';
   if(!rows.length) return h+'<div class="empty">No sessions in this season yet.</div>'+(isAdmin()?seasonAdmin():'');
-  h+='<div class="scroll"><table class="tbl"><thead><tr><th>#</th><th class="l">Player</th><th>Pts</th><th>Sessions</th><th>W–L</th><th>MVP</th></tr></thead><tbody>';
-  rows.forEach((r,i)=>{ h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name"><button class="linkbtn" data-act="profile" data-pid="'+r.id+'">'+esc(nameOf(r.id))+'</button>'+(i===0?'<span class="tag mvp">leader</span>':'')+'</td><td class="big">'+r.pts+'</td><td>'+r.sessions+'</td><td class="num">'+r.w+'–'+r.l+'</td><td>'+(r.mvp||'')+'</td></tr>'; });
+  h+='<div class="scroll"><table class="tbl"><thead><tr><th>#</th><th class="l">Player</th><th>Win%</th><th>W–L</th><th>+/− per game</th><th>Sessions</th><th>MVP</th></tr></thead><tbody>';
+  rows.forEach((r,i)=>{ const d=perGame(r.pf,r.pa,r.g); h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name"><button class="linkbtn" data-act="profile" data-pid="'+r.id+'">'+esc(nameOf(r.id))+'</button>'+(i===0?'<span class="tag mvp">leader</span>':'')+(r.g<10?'<span class="tag" title="Fewer than 10 games this season">new</span>':'')+'</td><td class="big">'+pctTxt(r.w,r.g)+'</td><td class="num">'+r.w+'–'+r.l+'</td><td class="'+(d>0?'up':d<0?'down':'')+'">'+pgTxt(d)+'</td><td>'+r.sessions+'</td><td>'+(r.mvp||'')+'</td></tr>'; });
   h+='</tbody></table></div>';
   return h+(isAdmin()?seasonAdmin():'');
 }
@@ -1073,7 +1082,8 @@ function ratingsLegend(){
     +'<p>Everyone starts at <b class="num">1500</b>. After each game the two teams are compared by average rating; the underdog gains more for a win than the favourite does.</p>'
     +'<p>Margin matters: an 11–2 moves the needle more than an 11–9. Your first 10 games count extra so a new rating settles quickly, then it steadies.</p>'
     +'<p>Ratings are recalculated from the full game history every time a score is entered or corrected, so fixing an old score fixes everything downstream.</p>'
-    +'<p>Before each game the card shows each team\'s win chance from the ratings; a win at under 40% is tagged UPSET. <b>Season</b> points reward showing up: 3 per session played, 1 per win, 2 for Day MVP.</p>'
+    +'<p>Before each game the card shows each team\'s win chance from the ratings; a win at under 40% is tagged UPSET.</p>'
+    +'<p><b>Standings, Day MVP, Record and Season</b> are ranked by <b>win %</b>, not total wins, so playing more games does not push you up unless you win them. To stop a lucky 2–0 beating a solid 9–3, everyone gets 2 extra wins and 2 extra losses in the ranking maths only (a 2–0 counts as 67%, a 9–3 as 69%). Ties go to +/− points per game.</p>'
     +'</div></section>';
 }
 /* --- History tab --- */
