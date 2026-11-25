@@ -267,7 +267,19 @@ const fmtTime=t=>{ if(!t) return ''; const [hh,mm]=t.split(':').map(Number); con
 const sortedEvents=()=>Object.values(S.events).sort((a,b)=>(a.date+(a.time||''))<(b.date+(b.time||''))?-1:1);
 const startableEvents=()=>sortedEvents().filter(e=>e.date>=todayISO()&&!(e.sessionId&&S.sessions&&S.sessions[e.sessionId]));
 const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=todayISO());
-const regList=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
+const regRaw=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
+/* Fair rotation: players who sat out the last game day get first claim on capped spots */
+const rotationOn=()=>S.settings.rotation!==false;
+const isActive=pid=>{ const p=byId()[pid]; return !!p&&p.active!==false; };
+function lastPlayedBefore(date){ // players from the most recent game day before `date` (all sessions/courts that day)
+  const ss=sortedSessions().filter(s=>s.date<date&&gamesOf(s).some(g=>g.done&&!g.void));
+  if(!ss.length) return null; const d=ss[ss.length-1].date;
+  const set=new Set(); ss.filter(s=>s.date===d).forEach(s=>(s.playerIds||[]).forEach(p=>set.add(p)));
+  return {date:d,set};
+}
+const regList=e=>{ const r=regRaw(e); if(!(e.max>0)||!rotationOn()) return r;
+  const lp=lastPlayedBefore(e.date); if(!lp) return r;
+  const pri=p=>!lp.set.has(p)&&isActive(p); return r.filter(pri).concat(r.filter(p=>!pri(p))); };
 const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
 let DEVICE=null; try{ DEVICE=localStorage.getItem('bkc-device'); if(!DEVICE){ DEVICE='d'+Math.random().toString(36).slice(2,10)+Date.now().toString(36); localStorage.setItem('bkc-device',DEVICE); } }catch(e){ DEVICE='tmp'; }
 const claimDevices=pid=>{ const c=(S.claims||{})[pid]; if(!c) return []; if(typeof c==='string') return [c]; if(c&&typeof c==='object') return Object.keys(c.devices||{}); return []; };
@@ -792,7 +804,7 @@ function viewSession(s){
   h+='<div class="progress" style="margin:12px 0 4px"><i style="width:'+(live?Math.round(played/live*100):0)+'%"></i></div>';
   if(played===0) h+='<div class="actions" style="margin-top:12px"><button class="sm" data-act="lineup-img" data-sid="'+s.id+'">Line-up card</button></div>';
   h+='</section>';
-  if(live&&played===live) h+=reportBlock(s);
+  if(live&&played===live) h+=reportBlock(s)+nextGameBlock(s);
   // standings
   const st=dayStandings(s).filter(r=>r.g>0);
   if(st.length){
@@ -820,6 +832,32 @@ function viewSession(s){
     h+='</section>';
   }
   return h;
+}
+
+/* --- Next game: who gets priority --- */
+function nextGameLists(date){
+  const set=new Set(); sortedSessions().filter(s=>s.date===date).forEach(s=>(s.playerIds||[]).forEach(p=>set.add(p)));
+  const act=S.players.filter(p=>p.active!==false).map(p=>p.id);
+  return {first:act.filter(p=>!set.has(p)), played:[...set].filter(p=>byId()[p])};
+}
+function nextGameText(date){
+  const L=nextGameLists(date), ev=upcomingEvents().find(e=>e.date>date);
+  return 'BKC — next game line-up 🏓\n(after '+fmtDate(date)+')'
+    +'\n\n🟢 Register FIRST — sat out last game ('+L.first.length+'):\n'+(L.first.map(nameOf).join(', ')||'—')
+    +'\n\n⏳ Played last game — register after / waitlist ('+L.played.length+'):\n'+(L.played.map(nameOf).join(', ')||'—')
+    +(rotationOn()?'\n\nThe app gives priority automatically: when spots are limited, the 🟢 group goes ahead of anyone who played last time.':'')
+    +(ev?'\n\nRegister here:\n'+eventUrl(ev):'');
+}
+function nextGameBlock(s){
+  const latest=sortedSessions().filter(x=>gamesOf(x).some(g=>g.done&&!g.void)).pop();
+  if(!latest||latest.date!==s.date) return ''; // only for the most recent game day
+  const L=nextGameLists(s.date), chip=p=>'<span class="r">'+esc(nameOf(p))+'</span>';
+  return '<section class="card"><div class="eyebrow">Next game</div><h3 style="margin:2px 0 10px">Who registers first</h3>'
+    +'<div class="small" style="margin-bottom:6px"><b>🟢 Priority — sat out today ('+L.first.length+')</b></div><div class="regs">'+(L.first.map(chip).join('')||'<span class="muted small">Everyone played today</span>')+'</div>'
+    +'<div class="small" style="margin:12px 0 6px"><b>⏳ Played today — after / waitlist ('+L.played.length+')</b></div><div class="regs">'+L.played.map(p=>'<span class="r wait">'+esc(nameOf(p))+'</span>').join('')+'</div>'
+    +'<p class="small muted" style="margin:10px 0 0">'+(rotationOn()?'Applied automatically on the next capped event: the priority group is placed ahead of today\'s players, whatever order they sign up in.':'Fair rotation is off (Players → Settings), so this list is a guide only.')+'</p>'
+    +'<div class="actions" style="margin-top:12px"><a class="wa" style="text-decoration:none;display:inline-flex;align-items:center;padding:9px 14px;border-radius:10px;font-weight:600" href="https://wa.me/?text='+encodeURIComponent(nextGameText(s.date))+'" target="_blank" rel="noopener">Share on WhatsApp</a>'
+    +'<button class="ghost" data-act="copy-next" data-date="'+s.date+'">Copy text</button></div></section>';
 }
 
 /* --- Match report --- */
@@ -855,9 +893,11 @@ function eventCard(e,o){
   h+='<div style="margin-top:14px">';
   if(regs.length){
     const rm=p=>(isAdmin()&&!closed?' <button class="sm ghost" style="padding:0 4px;border:0;line-height:1;color:inherit" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+p+'" aria-label="Remove">✕</button>':'');
-    h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+esc(nameOf(p))+rm(p)+'</span>').join('')
+    const lp=(cap&&rotationOn())?lastPlayedBefore(e.date):null, pr=p=>(lp&&!lp.set.has(p)&&isActive(p)?'<i title="Sat out last game day — priority">★</i>':'');
+    h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+pr(p)+esc(nameOf(p))+rm(p)+'</span>').join('')
       +wait.map((p,i)=>'<span class="r wait'+(p===ME?' me':'')+'"><i>W'+(i+1)+'</i>'+esc(nameOf(p))+rm(p)+'</span>').join('')+'</div>';
     if(wait.length) h+='<p class="small muted" style="margin:8px 0 0">'+wait.length+' on the waitlist — they move up automatically if someone drops out.</p>';
+    if(lp) h+='<p class="small muted" style="margin:6px 0 0">Fair rotation: ★ = sat out the last game ('+fmtDate(lp.date)+') and gets first claim on the '+cap+' spots. Anyone who played then fills the remaining spots in sign-up order.</p>';
   }else h+='<p class="muted" style="margin:0">Nobody registered yet. Be the first.</p>';
   h+='</div>';
   // registration controls
@@ -866,6 +906,7 @@ function eventCard(e,o){
     if(ME&&byId()[ME]&&!ui.pickMe&&!ui.addMode){
       h+='<div class="me-bar"><span>You are <b>'+esc(nameOf(ME))+'</b></span><span class="row" style="gap:4px">'+(isAdmin()?'<button class="sm ghost" data-act="add-mode" data-eid="'+e.id+'">Add others</button>':'')+'<button class="sm ghost" data-act="pick-me">Not you?</button></span></div>';
       if(meIn&&!canUnreg(e.id,ME)) h+='<p class="small muted" style="margin:0">You are registered (from another phone). To cancel, ask the organizer to remove you.</p>';
+      else if(!meIn&&!isActive(ME)&&!isAdmin()) h+='<p class="small muted" style="margin:0">'+esc(first(ME))+' is marked inactive. Ask the organizer to add you.</p>';
       else h+='<div class="actions">'+(meIn
         ?'<button class="grow" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+ME+'">I can\'t make it</button>'
         :'<button class="accent grow" data-act="reg-in" data-eid="'+e.id+'" data-pid="'+ME+'">I\'m in</button>')+'</div>';
@@ -1098,7 +1139,7 @@ function viewHistory(){
       st.forEach((r,i)=>{const d=r.pf-r.pa;h+='<tr><td class="rank">'+(i+1)+'</td><td class="l name">'+esc(nameOf(r.id))+'</td><td class="num">'+r.w+'–'+r.l+'</td><td class="'+(d>0?'up':d<0?'down':'')+'">'+(d>0?'+':'')+d+'</td></tr>';});
       h+='</tbody></table></div>';
     }
-    h+=reportBlock(s);
+    h+=reportBlock(s)+(s.status!=='open'?nextGameBlock(s):'');
     h+='<div class="stack" style="gap:6px">'+gamesHTML(games,s.playerIds,false,s.id,courtsOf(s))+'</div>';
     if(canWrite()&&isAdmin()){
       h+='<div class="actions">'+(s.status!=='open'?'<button class="sm" data-act="reopen" data-sid="'+s.id+'">Reopen to fix scores</button>':'')
@@ -1136,7 +1177,8 @@ function viewPlayers(){
     h+='<section class="card"><h3>Settings</h3><div class="row" style="gap:12px;margin-top:10px;align-items:end">'
       +'<label class="field">Games to<input type="number" data-setting="pointsTo" value="'+(S.settings.pointsTo||11)+'" min="5" max="25"></label>'
       +'<label class="field">Session minutes<input type="number" data-setting="minutes" value="'+(S.settings.minutes||120)+'" min="30" max="300" step="15"></label>'
-      +'<label class="field">Default games each<input type="number" data-setting="target" value="'+(S.settings.target||6)+'" min="3" max="12"></label></div></section>';
+      +'<label class="field">Default games each<input type="number" data-setting="target" value="'+(S.settings.target||6)+'" min="3" max="12"></label></div>'
+      +'<label class="row" style="gap:8px;margin-top:12px;align-items:flex-start"><input type="checkbox" data-flag="rotation"'+(rotationOn()?' checked':'')+' style="margin-top:3px"><span><b>Fair rotation</b><br><span class="small muted">When an event has a player limit, those who sat out the last game day get the spots first; those who played go after them / to the waitlist.</span></span></label></section>';
   }
   return h;
 }
@@ -1157,6 +1199,7 @@ document.addEventListener('change',e=>{
   if(t.dataset.setup){ if(t.dataset.setup==='date') ui.setup.date=t.value; else if(t.dataset.setup==='courts') ui.setup.courts=Number(t.value); else ui.setup.target=Number(t.value); ui.preview=null; render(); return; }
   if(t.dataset.pick){ if(!ui.setup){ const cs=currentSession(); ui.setup={sel:cs?cs.playerIds.slice():[]}; } const list=ui.setup.sel; const i=list.indexOf(t.dataset.pick); if(t.checked&&i<0) list.push(t.dataset.pick); if(!t.checked&&i>=0) list.splice(i,1); ui.preview=null; render(); return; }
   if(t.dataset.rename!==undefined){ if(!isAdmin()) return; const p=byId()[t.dataset.rename]; const v=t.value.trim(); if(p&&v&&v!==p.name){ p.name=v; write('players',S.players); toast('Renamed'); } else render(); return; }
+  if(t.dataset.flag){ if(!isAdmin()) return; patch('settings',{[t.dataset.flag]:!!t.checked}); toast('Saved'); return; }
   if(t.dataset.setting){ if(!isAdmin()) return; const v=Number(t.value); if(v>0){ patch('settings',{[t.dataset.setting]:v}); toast('Saved'); } return; }
 });
 document.addEventListener('submit',e=>{
@@ -1170,6 +1213,7 @@ document.addEventListener('submit',e=>{
   if(gf){ e.preventDefault(); const name=gf.name.value.trim(); if(!name) return;
     const existing=S.players.find(p=>p.name.trim().toLowerCase()===name.toLowerCase());
     if(!existing&&!gf.dataset.force){ const sim=S.players.filter(p=>p.active!==false&&similarName(p.name,name)); if(sim.length){ ui.suggest={eid:gf.dataset.eid,name,matches:sim.map(p=>p.id)}; render(); return; } }
+    if(existing&&existing.active===false&&!(ui.addMode&&isAdmin())){ toast(existing.name+' is inactive — ask the organizer to add you'); return; }
     let id; if(existing){ id=existing.id; } else { id=slug(name); const base=id; let k=2; const ids=new Set(S.players.map(p=>p.id)); while(ids.has(id)) id=base+'-'+(k++);
       write('players',S.players.concat([{id,name,active:true}])); }
     if(ui.addMode&&isAdmin()){ patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now(),by:'organizer'}}); toast('Added '+name); return; } if(lockedForMe(id)){ toast('That name is linked to another phone'); return; } if(!ownedByMe(id)) claimWrite(id); setMe(id); ui.pickMe=false; addMine(gf.dataset.eid,id); patch('events/'+gf.dataset.eid+'/regs',{[id]:{at:Date.now()}}); toast('You are in, '+name); return; }
@@ -1269,8 +1313,11 @@ function handle(act,btn){
       setMe(pid); ui.pickMe=false;
       if(!(e.regs||{})[pid]){ addMine(e.id,pid); patch('events/'+e.id+'/regs',{[pid]:{at:Date.now()}}); toast('You are in, '+first(pid)); } else render(); break; }
     case 'unlink': patch('claims',{[btn.dataset.pid]:null}); toast('Phone unlinked — they can claim the name again'); break;
-    case 'reg-in': if(lockedForMe(btn.dataset.pid)&&!isAdmin()){ setMe(null); ui.pickMe=true; render(); toast('This name is now linked to another phone'); return; } if(!ownedByMe(btn.dataset.pid)) claimWrite(btn.dataset.pid); addMine(btn.dataset.eid,btn.dataset.pid); patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
+    case 'reg-in': if(!isActive(btn.dataset.pid)&&!isAdmin()){ toast(first(btn.dataset.pid)+' is inactive — ask the organizer'); return; } if(lockedForMe(btn.dataset.pid)&&!isAdmin()){ setMe(null); ui.pickMe=true; render(); toast('This name is now linked to another phone'); return; } if(!ownedByMe(btn.dataset.pid)) claimWrite(btn.dataset.pid); addMine(btn.dataset.eid,btn.dataset.pid); patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:{at:Date.now()}}); toast('You are in'); break;
     case 'reg-out': if(!canUnreg(btn.dataset.eid,btn.dataset.pid)){ toast('Only the organizer can remove others'); return; } patch('events/'+btn.dataset.eid+'/regs',{[btn.dataset.pid]:null}); toast('Removed from the list'); break;
+    case 'copy-next': { const txt=nextGameText(btn.dataset.date);
+      if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Copied'),()=>toast('Could not copy — use Share on WhatsApp'));
+      else toast('Copy not supported here — use Share on WhatsApp'); break; }
     case 'copy-invite': { const e=S.events[btn.dataset.eid]; if(!e) return; const txt=inviteText(e);
       if(navigator.clipboard&&navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(()=>toast('Invite copied'),()=>toast('Could not copy — use Share on WhatsApp'));
       else toast('Copy not supported here — use Share on WhatsApp'); break; }
