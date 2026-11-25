@@ -269,7 +269,9 @@ const startableEvents=()=>sortedEvents().filter(e=>e.date>=todayISO()&&!(e.sessi
 const upcomingEvents=()=>sortedEvents().filter(e=>e.status!=='closed'&&e.date>=todayISO());
 const regRaw=e=>Object.entries(e.regs||{}).filter(([,r])=>r).sort((a,b)=>(a[1].at||0)-(b[1].at||0)).map(([pid])=>pid);
 /* Fair rotation: players who sat out the last game day get first claim on capped spots */
+const ROTATION_FROM='2026-11-25'; // fair rotation applies to events dated from this day on (not Nov 24 or earlier)
 const rotationOn=()=>S.settings.rotation!==false;
+const rotationFor=e=>rotationOn()&&!!e&&e.date>=ROTATION_FROM;
 const isActive=pid=>{ const p=byId()[pid]; return !!p&&p.active!==false; };
 function lastPlayedBefore(date){ // players from the most recent game day before `date` (all sessions/courts that day)
   const ss=sortedSessions().filter(s=>s.date<date&&gamesOf(s).some(g=>g.done&&!g.void));
@@ -277,7 +279,7 @@ function lastPlayedBefore(date){ // players from the most recent game day before
   const set=new Set(); ss.filter(s=>s.date===d).forEach(s=>(s.playerIds||[]).forEach(p=>set.add(p)));
   return {date:d,set};
 }
-const regList=e=>{ const r=regRaw(e); if(!(e.max>0)||!rotationOn()) return r;
+const regList=e=>{ const r=regRaw(e); if(!(e.max>0)||!rotationFor(e)) return r;
   const lp=lastPlayedBefore(e.date); if(!lp) return r;
   const pri=p=>!lp.set.has(p)&&isActive(p); return r.filter(pri).concat(r.filter(p=>!pri(p))); };
 const eventUrl=e=>location.origin+location.pathname+'#event='+e.id;
@@ -893,7 +895,7 @@ function eventCard(e,o){
   h+='<div style="margin-top:14px">';
   if(regs.length){
     const rm=p=>(isAdmin()&&!closed?' <button class="sm ghost" style="padding:0 4px;border:0;line-height:1;color:inherit" data-act="reg-out" data-eid="'+e.id+'" data-pid="'+p+'" aria-label="Remove">✕</button>':'');
-    const lp=(cap&&rotationOn())?lastPlayedBefore(e.date):null, pr=p=>(lp&&!lp.set.has(p)&&isActive(p)?'<i title="Sat out last game day — priority">★</i>':'');
+    const lp=(cap&&rotationFor(e))?lastPlayedBefore(e.date):null, pr=p=>(lp&&!lp.set.has(p)&&isActive(p)?'<i title="Sat out last game day — priority">★</i>':'');
     h+='<div class="regs">'+playing.map((p,i)=>'<span class="r'+(p===ME?' me':'')+'">'+pr(p)+esc(nameOf(p))+rm(p)+'</span>').join('')
       +wait.map((p,i)=>'<span class="r wait'+(p===ME?' me':'')+'"><i>W'+(i+1)+'</i>'+esc(nameOf(p))+rm(p)+'</span>').join('')+'</div>';
     if(wait.length) h+='<p class="small muted" style="margin:8px 0 0">'+wait.length+' on the waitlist — they move up automatically if someone drops out.</p>';
